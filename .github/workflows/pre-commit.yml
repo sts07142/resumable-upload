@@ -1,0 +1,22 @@
+name: Pre-commit
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install pre-commit
+      run: |
+        python3 -m pip install --upgrade pip
+        pip install pre-commit
+
+    - name: Run pre-commit
+      run: |
+        pre-commit run --all-files

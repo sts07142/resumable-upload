@@ -1,0 +1,9 @@
+include README.md
+include README.ko.md
+include LICENSE
+include CHANGELOG.md
+include TUS_COMPLIANCE.md
+recursive-include resumable_upload *.py
+recursive-include examples *.py
+recursive-exclude tests *
+recursive-exclude .github *

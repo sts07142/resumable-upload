@@ -1,0 +1,102 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resumable-upload"
+version = "0.0.1"
+description = "A Python implementation of the `TUS resumable upload protocol` for server and client, with zero runtime dependencies."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Injae Ryou", email = "sts07142@naver.com"}
+]
+keywords = ["tus", "upload", "resumable", "file-upload", "server", "client", "http"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: System :: Networking",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/sts07142/resumable-upload"
+Documentation = "https://github.com/sts07142/resumable-upload#readme"
+Repository = "https://github.com/sts07142/resumable-upload"
+Issues = "https://github.com/sts07142/resumable-upload/issues"
+Changelog = "https://github.com/sts07142/resumable-upload/releases"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.1.0",
+    "pre-commit>=3.0.0",
+    "tox>=4.0.0",
+]
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "flask>=2.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.38.0",
+    "httpx>=0.24.0",
+    "django>=3.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # zip without `strict=`
+    "B905",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["resumable_upload*"]
