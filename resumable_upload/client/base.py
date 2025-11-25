@@ -56,6 +56,7 @@ class TusClient:
         store_url: bool = False,
         url_storage: Optional[URLStorage] = None,
         fingerprinter: Optional[Fingerprint] = None,
+        headers: Optional[dict[str, str]] = None,
     ):
         """Initialize TUS client.
 
@@ -68,6 +69,7 @@ class TusClient:
             store_url: Store upload URLs for resumability (default: False)
             url_storage: Custom URL storage implementation
             fingerprinter: Custom fingerprint implementation
+            headers: Optional custom headers to include in all requests
 
         Raises:
             ValueError: If chunk_size is less than 1
@@ -82,6 +84,7 @@ class TusClient:
         self.store_url = store_url
         self.url_storage = url_storage
         self.fingerprinter = fingerprinter or Fingerprint()
+        self.headers = headers or {}
 
     def upload_file(
         self,
@@ -226,6 +229,7 @@ class TusClient:
         """
         headers = {
             "Tus-Resumable": self.TUS_VERSION,
+            **self.headers,
         }
 
         req = Request(upload_url, headers=headers, method="DELETE")
@@ -244,6 +248,7 @@ class TusClient:
         headers = {
             "Tus-Resumable": self.TUS_VERSION,
             "Upload-Length": str(file_size),
+            **self.headers,
         }
 
         if encoded_metadata:
@@ -301,6 +306,7 @@ class TusClient:
         """Get the current upload offset."""
         headers = {
             "Tus-Resumable": self.TUS_VERSION,
+            **self.headers,
         }
 
         try:
@@ -324,6 +330,7 @@ class TusClient:
             "Upload-Offset": str(offset),
             "Content-Type": "application/offset+octet-stream",
             "Content-Length": str(len(data)),
+            **self.headers,
         }
 
         # Add checksum if enabled

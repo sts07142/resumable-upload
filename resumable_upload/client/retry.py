@@ -39,6 +39,7 @@ class TusClientWithRetry(TusClient):
         checksum: bool = True,  # Enable checksum verification
         max_retries: int = 3,  # Retry attempts per chunk
         retry_delay: float = 1.0,  # Initial delay between retries (seconds)
+        **kwargs,
     ):
         """Initialize TUS client with retry capability.
 
@@ -48,8 +49,9 @@ class TusClientWithRetry(TusClient):
             checksum: Enable SHA1 checksum verification (default: True)
             max_retries: Maximum retry attempts for failed chunks (default: 3)
             retry_delay: Base delay between retry attempts in seconds (default: 1.0)
+            **kwargs: Additional keyword arguments to pass to the base TusClient initializer
         """
-        super().__init__(url=url, chunk_size=chunk_size, checksum=checksum)
+        super().__init__(url=url, chunk_size=chunk_size, checksum=checksum, **kwargs)
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.stats_lock = Lock()

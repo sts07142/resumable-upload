@@ -20,7 +20,11 @@ def main():
     storage = SQLiteStorage(db_path="uploads.db", upload_dir="uploads")
 
     # Create TUS server
-    tus_server = TusServer(storage=storage, base_path="/files", max_size=100 * 1024 * 1024)
+    tus_server = TusServer(
+        storage=storage,
+        base_path="/files",
+        max_size=100 * 1024 * 1024,
+    )
 
     # Create HTTP handler
     class Handler(TusHTTPRequestHandler):

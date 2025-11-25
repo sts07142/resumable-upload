@@ -32,8 +32,17 @@ def main():
         print(f"Error: File not found: {file_path}")
         sys.exit(1)
 
-    # Create client
-    client = TusClient(server_url, chunk_size=1024 * 1024)  # 1MB chunks
+    # Create client with custom headers (e.g., for authentication)
+    # Example: Add Authorization header or custom API key
+    custom_headers = {
+        # "Authorization": "Bearer your-token-here",
+        # "X-API-Key": "your-api-key-here",
+    }
+    client = TusClient(
+        server_url,
+        chunk_size=1024 * 1024,  # 1MB chunks
+        headers=custom_headers,  # Custom headers will be included in all requests
+    )
 
     # Upload file
     print(f"Uploading {file_path} to {server_url}")
