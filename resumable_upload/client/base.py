@@ -4,7 +4,7 @@ import base64
 import hashlib
 import os
 import re
-from typing import IO, Callable, Optional, Union
+from typing import IO, Any, Callable, Optional, Union
 from urllib.error import HTTPError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
@@ -384,3 +384,194 @@ class TusClient:
         else:
             file_source.seek(0)
             return file_source
+
+    def update_headers(self, headers: dict[str, str]) -> None:
+        """Update custom headers for all requests.
+
+        Args:
+            headers: Dictionary of header names to values
+
+        Example:
+            >>> client = TusClient("http://localhost:8080/files")
+            >>> client.update_headers({"Authorization": "Bearer token"})
+            >>> # Update existing headers
+            >>> client.update_headers({"X-API-Key": "new-key"})
+        """
+        self.headers.update(headers)
+
+    def get_headers(self) -> dict[str, str]:
+        """Get current custom headers.
+
+        Returns:
+            Dictionary of current custom headers
+
+        Example:
+            >>> client = TusClient("http://localhost:8080/files")
+            >>> client.update_headers({"Authorization": "Bearer token"})
+            >>> headers = client.get_headers()
+            >>> print(headers)  # {"Authorization": "Bearer token"}
+        """
+        return self.headers.copy()
+
+    def get_metadata(self, upload_url: str) -> dict[str, str]:
+        """Get metadata for an upload.
+
+        Args:
+            upload_url: URL of the upload
+
+        Returns:
+            Dictionary of metadata key-value pairs
+
+        Raises:
+            TusCommunicationError: If request fails or metadata cannot be parsed
+
+        Example:
+            >>> client = TusClient("http://localhost:8080/files")
+            >>> metadata = client.get_metadata("http://localhost:8080/files/abc123")
+            >>> # {"filename": "test.bin", "content-type": "application/octet-stream"}
+        """
+        headers = {
+            "Tus-Resumable": self.TUS_VERSION,
+            **self.headers,
+        }
+
+        try:
+            req = Request(upload_url, headers=headers, method="HEAD")
+            with urlopen(req) as response:
+                upload_metadata = response.headers.get("Upload-Metadata")
+                if not upload_metadata:
+                    return {}
+
+                # Parse metadata
+                metadata = {}
+                for pair in upload_metadata.split(","):
+                    pair = pair.strip()
+                    if " " in pair:
+                        key, value = pair.split(" ", 1)
+                        # Decode base64 value
+                        try:
+                            decoded_value = base64.b64decode(value).decode(self.metadata_encoding)
+                            metadata[key] = decoded_value
+                        except Exception:
+                            # If decoding fails, use raw value
+                            metadata[key] = value
+
+                return metadata
+        except HTTPError as e:
+            raise TusCommunicationError(
+                f"Failed to get metadata: {e.reason}",
+                status_code=e.code,
+                response_content=e.read(),
+            ) from e
+
+    def get_upload_info(self, upload_url: str) -> dict[str, Any]:
+        """Get upload information including offset, length, and metadata.
+
+        Args:
+            upload_url: URL of the upload
+
+        Returns:
+            Dictionary containing:
+                - offset (int): Current upload offset in bytes
+                - length (int): Total upload length in bytes
+                - complete (bool): Whether upload is complete
+                - metadata (dict): Upload metadata
+
+        Raises:
+            TusCommunicationError: If request fails
+
+        Example:
+            >>> client = TusClient("http://localhost:8080/files")
+            >>> info = client.get_upload_info("http://localhost:8080/files/abc123")
+            >>> print(f"Progress: {info['offset']}/{info['length']}")
+            >>> print(f"Complete: {info['complete']}")
+        """
+        headers = {
+            "Tus-Resumable": self.TUS_VERSION,
+            **self.headers,
+        }
+
+        try:
+            req = Request(upload_url, headers=headers, method="HEAD")
+            with urlopen(req) as response:
+                offset_str = response.headers.get("Upload-Offset")
+                length_str = response.headers.get("Upload-Length")
+
+                offset = int(offset_str) if offset_str else 0
+                length = int(length_str) if length_str else 0
+                complete = length > 0 and offset >= length
+
+                # Get metadata
+                metadata = {}
+                upload_metadata = response.headers.get("Upload-Metadata")
+                if upload_metadata:
+                    for pair in upload_metadata.split(","):
+                        pair = pair.strip()
+                        if " " in pair:
+                            key, value = pair.split(" ", 1)
+                            try:
+                                decoded_value = base64.b64decode(value).decode(
+                                    self.metadata_encoding
+                                )
+                                metadata[key] = decoded_value
+                            except Exception:
+                                metadata[key] = value
+
+                return {
+                    "offset": offset,
+                    "length": length,
+                    "complete": complete,
+                    "metadata": metadata,
+                }
+        except HTTPError as e:
+            raise TusCommunicationError(
+                f"Failed to get upload info: {e.reason}",
+                status_code=e.code,
+                response_content=e.read(),
+            ) from e
+
+    def get_server_info(self) -> dict[str, Union[str, list[str], Optional[int]]]:
+        """Get server information and capabilities via OPTIONS request.
+
+        Returns:
+            Dictionary containing:
+                - version (str): TUS protocol version supported by server
+                - extensions (list[str]): List of supported TUS extensions
+                - max_size (int | None): Maximum upload size in bytes (None if unlimited)
+
+        Raises:
+            TusCommunicationError: If request fails
+
+        Example:
+            >>> client = TusClient("http://localhost:8080/files")
+            >>> info = client.get_server_info()
+            >>> print(f"TUS Version: {info['version']}")
+            >>> print(f"Extensions: {info['extensions']}")
+            >>> print(f"Max Size: {info['max_size']}")
+        """
+        try:
+            req = Request(self.url, method="OPTIONS")
+            with urlopen(req) as response:
+                tus_version = response.headers.get("Tus-Version", self.TUS_VERSION)
+                tus_extension = response.headers.get("Tus-Extension", "")
+                tus_max_size = response.headers.get("Tus-Max-Size")
+
+                extensions = (
+                    [ext.strip() for ext in tus_extension.split(",") if ext.strip()]
+                    if tus_extension
+                    else []
+                )
+
+                max_size = int(tus_max_size) if tus_max_size else None
+
+                return {
+                    "version": tus_version,
+                    "extensions": extensions,
+                    "max_size": max_size,
+                }
+        except HTTPError as e:
+            raise TusCommunicationError(
+                f"Failed to get server info: {e.reason}",
+                status_code=e.code,
+                response_content=e.read(),
+            ) from e
