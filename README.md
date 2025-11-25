@@ -76,8 +76,12 @@ from resumable_upload import TusClient
 client = TusClient("http://localhost:8080/files")
 
 # Upload file with progress callback
-def progress(uploaded, total):
-    print(f"Progress: {uploaded}/{total} bytes ({uploaded/total*100:.1f}%)")
+from resumable_upload import UploadStats
+
+def progress(stats: UploadStats):
+    print(f"Progress: {stats.progress_percent:.1f}% | "
+          f"{stats.uploaded_bytes}/{stats.total_bytes} bytes | "
+          f"Speed: {stats.upload_speed_mbps:.2f} MB/s")
 
 upload_url = client.upload_file(
     "large_file.bin",
@@ -93,19 +97,21 @@ print(f"Upload complete: {upload_url}")
 ### Client with Automatic Retry
 
 ```python
-from resumable_upload import TusClientWithRetry
+from resumable_upload import TusClient
 
-# Create client with retry capability
-client = TusClientWithRetry(
+# Create client with retry capability (retry is enabled by default)
+client = TusClient(
     "http://localhost:8080/files",
     chunk_size=1.5*1024*1024,  # 1.5MB chunks (float is allowed)
-    max_retries=3,         # Retry up to 3 times
-    retry_delay=1.0,       # Initial delay between retries
+    max_retries=3,         # Retry up to 3 times (default: 3)
+    retry_delay=1.0,       # Initial delay between retries (default: 1.0)
     checksum=True          # Enable checksum verification
 )
 
-# Upload with detailed progress tracking
-def progress_callback(stats):
+# Upload with progress tracking using UploadStats
+from resumable_upload import UploadStats
+
+def progress_callback(stats: UploadStats):
     print(f"Progress: {stats.progress_percent:.1f}% | "
           f"Speed: {stats.upload_speed/1024/1024:.2f} MB/s | "
           f"ETA: {stats.eta_seconds:.0f}s | "
@@ -247,28 +253,37 @@ Main client class for uploading files.
 
 - `url` (str): TUS server base URL
 - `chunk_size` (int): Size of each upload chunk in bytes (default: 1MB)
-- `checksum` (bool): Enable SHA1 checksum verification (default: False)
+- `checksum` (bool): Enable SHA1 checksum verification (default: True)
 - `store_url` (bool): Store upload URLs for resumability (default: False)
 - `url_storage` (URLStorage): URL storage backend (default: FileURLStorage)
 - `verify_tls_cert` (bool): Verify TLS certificates (default: True)
 - `metadata_encoding` (str): Metadata encoding (default: "utf-8")
+- `headers` (dict): Custom headers to include in all requests (default: {})
+- `max_retries` (int): Maximum retry attempts per chunk (default: 3)
+- `retry_delay` (float): Base delay between retry attempts in seconds (default: 1.0)
 
 **Methods:**
 
-- `upload_file(file_path=None, file_stream=None, metadata={}, progress_callback=None)`: Upload a file
+- `upload_file(file_path=None, file_stream=None, metadata={}, progress_callback=None, stop_at=None)`: Upload a file
 - `resume_upload(file_path, upload_url, progress_callback=None)`: Resume an interrupted upload
 - `delete_upload(upload_url)`: Delete an upload
-- `get_offset(upload_url)`: Get current upload offset
+- `get_upload_info(upload_url)`: Get upload information (offset, length, complete, metadata)
+- `get_metadata(upload_url)`: Get upload metadata
+- `get_server_info()`: Get server capabilities and information
+- `update_headers(headers)`: Update custom headers at runtime
+- `get_headers()`: Get current custom headers
+- `create_uploader(file_path=None, file_stream=None, upload_url=None, metadata={}, chunk_size=None)`: Create an Uploader instance
 
-### TusClientWithRetry
+### TusClient Retry Configuration
 
-Enhanced client with automatic retry capability (inherits from TusClient).
+The `TusClient` includes built-in retry functionality with exponential backoff.
 
-**Additional Parameters:**
+**Retry Parameters:**
 
-- `max_retries` (int): Maximum number of retry attempts (default: 3)
-- `retry_delay` (float): Initial delay between retries in seconds (default: 1.0)
-- `max_retry_delay` (float): Maximum delay between retries in seconds (default: 60.0)
+- `max_retries` (int): Maximum number of retry attempts per chunk (default: 3)
+- `retry_delay` (float): Base delay between retry attempts in seconds (default: 1.0)
+  - Uses exponential backoff: delay = retry_delay * (2^attempt)
+- To disable retry, set `max_retries=0`
 
 ### TusServer
 

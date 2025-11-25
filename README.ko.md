@@ -76,8 +76,12 @@ from resumable_upload import TusClient
 client = TusClient("http://localhost:8080/files")
 
 # 진행률 콜백과 함께 파일 업로드
-def progress(uploaded, total):
-    print(f"진행률: {uploaded}/{total} 바이트 ({uploaded/total*100:.1f}%)")
+from resumable_upload import UploadStats
+
+def progress(stats: UploadStats):
+    print(f"진행률: {stats.progress_percent:.1f}% | "
+          f"{stats.uploaded_bytes}/{stats.total_bytes} 바이트 | "
+          f"속도: {stats.upload_speed_mbps:.2f} MB/s")
 
 upload_url = client.upload_file(
     "large_file.bin",
@@ -93,21 +97,23 @@ print(f"업로드 완료: {upload_url}")
 ### 자동 재시도가 있는 클라이언트
 
 ```python
-from resumable_upload import TusClientWithRetry
+from resumable_upload import TusClient
 
-# 재시도 기능을 갖춘 클라이언트 생성
-client = TusClientWithRetry(
+# 재시도 기능을 갖춘 클라이언트 생성 (기본적으로 활성화됨)
+client = TusClient(
     "http://localhost:8080/files",
     chunk_size=1.5*1024*1024,  # 1.5MB 청크 (float 허용)
-    max_retries=3,         # 최대 3회 재시도
-    retry_delay=1.0,       # 재시도 간 초기 지연 시간
+    max_retries=3,         # 최대 3회 재시도 (기본값: 3)
+    retry_delay=1.0,       # 재시도 간 초기 지연 시간 (기본값: 1.0)
     checksum=True          # 체크섬 검증 활성화
 )
 
-# 상세한 진행률 추적과 함께 업로드
-def progress_callback(stats):
+# UploadStats를 사용한 진행률 추적과 함께 업로드
+from resumable_upload import UploadStats
+
+def progress_callback(stats: UploadStats):
     print(f"진행률: {stats.progress_percent:.1f}% | "
-          f"속도: {stats.upload_speed/1024/1024:.2f} MB/s | "
+          f"속도: {stats.upload_speed_mbps:.2f} MB/s | "
           f"예상 시간: {stats.eta_seconds:.0f}초 | "
           f"청크: {stats.chunks_completed}/{stats.total_chunks} | "
           f"재시도: {stats.chunks_retried}")
@@ -247,28 +253,39 @@ def tus_upload_view(request, upload_id=None):
 
 - `url` (str): TUS 서버 기본 URL
 - `chunk_size` (int): 각 업로드 청크의 크기(바이트) (기본값: 1MB)
-- `checksum` (bool): SHA1 체크섬 검증 활성화 (기본값: False)
+- `checksum` (bool): SHA1 체크섬 검증 활성화 (기본값: True)
 - `store_url` (bool): 재개를 위한 업로드 URL 저장 (기본값: False)
 - `url_storage` (URLStorage): URL 스토리지 백엔드 (기본값: FileURLStorage)
 - `verify_tls_cert` (bool): TLS 인증서 검증 (기본값: True)
 - `metadata_encoding` (str): 메타데이터 인코딩 (기본값: "utf-8")
+- `headers` (dict): 모든 요청에 포함할 커스텀 헤더 (기본값: {})
+- `max_retries` (int): 청크당 최대 재시도 횟수 (기본값: 3)
+- `retry_delay` (float): 재시도 간 기본 지연 시간(초) (기본값: 1.0)
 
 **메서드:**
 
-- `upload_file(file_path=None, file_stream=None, metadata={}, progress_callback=None)`: 파일 업로드
+- `upload_file(file_path=None, file_stream=None, metadata={}, progress_callback=None, stop_at=None)`: 파일 업로드
+  - `progress_callback`: `UploadStats` 객체를 받는 콜백 함수
 - `resume_upload(file_path, upload_url, progress_callback=None)`: 중단된 업로드 재개
+  - `progress_callback`: `UploadStats` 객체를 받는 콜백 함수
 - `delete_upload(upload_url)`: 업로드 삭제
-- `get_offset(upload_url)`: 현재 업로드 오프셋 가져오기
+- `get_upload_info(upload_url)`: 업로드 정보 조회 (offset, length, complete, metadata)
+- `get_metadata(upload_url)`: 업로드 메타데이터 조회
+- `get_server_info()`: 서버 기능 및 정보 조회
+- `update_headers(headers)`: 런타임에 커스텀 헤더 업데이트
+- `get_headers()`: 현재 커스텀 헤더 가져오기
+- `create_uploader(file_path=None, file_stream=None, upload_url=None, metadata={}, chunk_size=None)`: Uploader 인스턴스 생성
 
-### TusClientWithRetry
+### TusClient 재시도 설정
 
-자동 재시도 기능을 갖춘 향상된 클라이언트 (TusClient를 상속).
+`TusClient`는 지수 백오프를 사용한 내장 재시도 기능을 포함합니다.
 
-**추가 매개변수:**
+**재시도 매개변수:**
 
-- `max_retries` (int): 최대 재시도 횟수 (기본값: 3)
-- `retry_delay` (float): 재시도 간 초기 지연 시간(초) (기본값: 1.0)
-- `max_retry_delay` (float): 재시도 간 최대 지연 시간(초) (기본값: 60.0)
+- `max_retries` (int): 청크당 최대 재시도 횟수 (기본값: 3)
+- `retry_delay` (float): 재시도 간 기본 지연 시간(초) (기본값: 1.0)
+  - 지수 백오프 사용: delay = retry_delay * (2^attempt)
+- 재시도를 비활성화하려면 `max_retries=0` 설정
 
 ### TusServer
 

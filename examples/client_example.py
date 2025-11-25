@@ -5,17 +5,21 @@ import json
 import os
 import sys
 
-from resumable_upload import TusClient
+from resumable_upload import TusClient, UploadStats
 
 
-def progress_callback(uploaded, total):
+def progress_callback(stats: UploadStats):
     """Display upload progress."""
-    percent = (uploaded / total) * 100
+    percent = (stats.uploaded_bytes / stats.total_bytes) * 100
     bar_length = 50
-    filled = int(bar_length * uploaded / total)
+    filled = int(bar_length * stats.uploaded_bytes / stats.total_bytes)
     bar = "=" * filled + "-" * (bar_length - filled)
-    print(f"\rProgress: [{bar}] {percent:.1f}% ({uploaded}/{total} bytes)", end="")
-    if uploaded == total:
+    print(
+        f"\rProgress: [{bar}] {percent:.1f}% ({stats.uploaded_bytes}/{stats.total_bytes} bytes)",
+        end="",
+    )
+
+    if stats.uploaded_bytes == stats.total_bytes:
         print()
 
 
@@ -47,6 +51,7 @@ def main():
     )
 
     # Example: Get server information
+    print(f"Getting server information for {server_url}")
     try:
         server_info = client.get_server_info()
         print(f"Server TUS Version: {server_info['version']}")
@@ -56,8 +61,11 @@ def main():
     except Exception as e:
         print(f"Warning: Could not get server info: {e}")
 
+    print("--------------------------------")
+
     # Upload file
     print(f"Uploading {file_path} to {server_url}")
+    upload_url = None
     try:
         upload_url = client.upload_file(
             file_path,
@@ -66,18 +74,41 @@ def main():
         )
         print("Upload complete!")
         print(f"Upload URL: {upload_url}")
+    except Exception as e:
+        print(f"Upload failed: {e}")
 
-        # Example: Get upload information
+    # If upload failed, skip remaining examples
+    if upload_url is None:
+        print("\nSkipping remaining examples due to upload failure.")
+        sys.exit(1)
+
+    print("--------------------------------")
+
+    # Example: Get upload information
+    print(f"Getting upload information for {upload_url}")
+    try:
         upload_info = client.get_upload_info(upload_url)
         print(f"Upload offset: {upload_info['offset']}/{upload_info['length']}")
         print(f"Upload complete: {upload_info['complete']}")
         print(f"Upload metadata: {upload_info['metadata']}")
+    except Exception as e:
+        print(f"Getting upload information failed: {e}")
 
-        # Example: Get metadata only
+    print("--------------------------------")
+
+    # Example: Get metadata only
+    print(f"Getting metadata for {upload_url}")
+    try:
         metadata = client.get_metadata(upload_url)
         print(f"Metadata: {metadata}")
+    except Exception as e:
+        print(f"Getting metadata failed: {e}")
 
-        # Example: Use Uploader for fine-grained control
+    print("--------------------------------")
+
+    # Example: Use Uploader for fine-grained control
+    print(f"Using Uploader for fine-grained control for {upload_url}")
+    try:
         print("\n=== Example: Using Uploader ===")
         uploader = client.create_uploader(file_path, upload_url=upload_url)
         print(f"Uploader offset: {uploader.offset}, file size: {uploader.file_size}")
@@ -86,7 +117,8 @@ def main():
 
     except Exception as e:
         print(f"Upload failed: {e}")
-        sys.exit(1)
+
+    print("--------------------------------")
 
 
 if __name__ == "__main__":

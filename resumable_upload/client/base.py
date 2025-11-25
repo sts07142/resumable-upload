@@ -1,7 +1,6 @@
 """TUS protocol client implementation."""
 
 import base64
-import hashlib
 import os
 import re
 from typing import IO, Any, Callable, Optional, Union
@@ -9,7 +8,9 @@ from urllib.error import HTTPError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
-from resumable_upload.exceptions import TusCommunicationError, TusUploadFailed
+from resumable_upload.client.stats import UploadStats
+from resumable_upload.client.uploader import Uploader
+from resumable_upload.exceptions import TusCommunicationError
 from resumable_upload.fingerprint import Fingerprint
 from resumable_upload.url_storage import URLStorage
 
@@ -57,6 +58,8 @@ class TusClient:
         url_storage: Optional[URLStorage] = None,
         fingerprinter: Optional[Fingerprint] = None,
         headers: Optional[dict[str, str]] = None,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
     ):
         """Initialize TUS client.
 
@@ -70,6 +73,8 @@ class TusClient:
             url_storage: Custom URL storage implementation
             fingerprinter: Custom fingerprint implementation
             headers: Optional custom headers to include in all requests
+            max_retries: Maximum retry attempts for failed chunks (default: 3)
+            retry_delay: Base delay between retry attempts in seconds (default: 1.0)
 
         Raises:
             ValueError: If chunk_size is less than 1
@@ -85,13 +90,15 @@ class TusClient:
         self.url_storage = url_storage
         self.fingerprinter = fingerprinter or Fingerprint()
         self.headers = headers or {}
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
     def upload_file(
         self,
         file_path: Optional[str] = None,
         file_stream: Optional[IO] = None,
         metadata: Optional[dict[str, str]] = None,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
+        progress_callback: Optional[Callable[[UploadStats], None]] = None,
         stop_at: Optional[int] = None,
     ) -> str:
         """Upload a file to the server.
@@ -100,7 +107,7 @@ class TusClient:
             file_path: Path to file to upload (required if file_stream not provided)
             file_stream: File stream to upload (alternative to file_path)
             metadata: Optional metadata dictionary
-            progress_callback: Optional callback function(uploaded_bytes, total_bytes)
+            progress_callback: Optional callback function that receives UploadStats
             stop_at: Stop upload at this byte offset (for partial uploads)
 
         Returns:
@@ -144,48 +151,36 @@ class TusClient:
                 fingerprint = self.fingerprinter.get_fingerprint(file_path or file_stream)
                 self.url_storage.set_url(fingerprint, upload_url)
 
-        # Upload file in chunks
-        if file_stream:
-            fs = file_stream
-            fs.seek(0)
-        else:
-            fs = open(file_path, "rb")  # noqa: SIM115
+        uploader = Uploader(
+            url=upload_url,
+            file_path=file_path,
+            file_stream=file_stream,
+            chunk_size=self.chunk_size,
+            checksum=self.checksum,
+            metadata_encoding=self.metadata_encoding,
+            headers=self.headers.copy(),
+            max_retries=self.max_retries,
+            retry_delay=self.retry_delay,
+        )
 
         try:
-            offset = self._get_offset(upload_url)
-            fs.seek(offset)
-
-            max_offset = stop_at if stop_at is not None else file_size
-
-            while offset < max_offset:
-                chunk_size = min(self.chunk_size, max_offset - offset)
-                chunk = fs.read(chunk_size)
-                if not chunk:
-                    break
-
-                self._upload_chunk(upload_url, offset, chunk)
-                offset += len(chunk)
-
-                if progress_callback:
-                    progress_callback(offset, file_size)
+            uploader.upload(progress_callback=progress_callback, stop_at=stop_at)
+            return uploader.url
         finally:
-            if not file_stream and file_path:
-                fs.close()
-
-        return upload_url
+            uploader.close()
 
     def resume_upload(
         self,
         file_path: str,
         upload_url: str,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
+        progress_callback: Optional[Callable[[UploadStats], None]] = None,
     ) -> str:
         """Resume an interrupted upload.
 
         Args:
             file_path: Path to file to upload
             upload_url: URL of the existing upload
-            progress_callback: Optional callback function(uploaded_bytes, total_bytes)
+            progress_callback: Optional callback function that receives UploadStats
 
         Returns:
             URL of the uploaded file
@@ -196,27 +191,22 @@ class TusClient:
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
+        uploader = Uploader(
+            url=upload_url,
+            file_path=file_path,
+            chunk_size=self.chunk_size,
+            checksum=self.checksum,
+            metadata_encoding=self.metadata_encoding,
+            headers=self.headers.copy(),
+            max_retries=self.max_retries,
+            retry_delay=self.retry_delay,
+        )
 
-        file_size = os.path.getsize(file_path)
-
-        # Get current offset
-        offset = self._get_offset(upload_url)
-
-        # Resume upload from current offset
-        with open(file_path, "rb") as f:
-            f.seek(offset)
-            while offset < file_size:
-                chunk = f.read(self.chunk_size)
-                if not chunk:
-                    break
-
-                self._upload_chunk(upload_url, offset, chunk)
-                offset += len(chunk)
-
-                if progress_callback:
-                    progress_callback(offset, file_size)
-
-        return upload_url
+        try:
+            uploader.upload(progress_callback=progress_callback)
+            return uploader.url
+        finally:
+            uploader.close()
 
     def delete_upload(self, upload_url: str) -> None:
         """Delete an upload from the server.
@@ -268,9 +258,7 @@ class TusClient:
                 return location
         except HTTPError as e:
             raise TusCommunicationError(
-                f"Failed to create upload: {e.reason}",
-                status_code=e.code,
-                response_content=e.read(),
+                f"Failed to create upload: {str(e)}",
             ) from e
 
     def encode_metadata(self, metadata: dict[str, str]) -> list:
@@ -302,54 +290,6 @@ class TusClient:
 
         return encoded_list
 
-    def _get_offset(self, upload_url: str) -> int:
-        """Get the current upload offset."""
-        headers = {
-            "Tus-Resumable": self.TUS_VERSION,
-            **self.headers,
-        }
-
-        try:
-            req = Request(upload_url, headers=headers, method="HEAD")
-            with urlopen(req) as response:
-                offset = response.headers.get("Upload-Offset")
-                if offset is None:
-                    raise TusCommunicationError("Server did not return Upload-Offset header")
-                return int(offset)
-        except HTTPError as e:
-            raise TusCommunicationError(
-                f"Failed to get offset: {e.reason}",
-                status_code=e.code,
-                response_content=e.read(),
-            ) from e
-
-    def _upload_chunk(self, upload_url: str, offset: int, data: bytes) -> None:
-        """Upload a chunk of data."""
-        headers = {
-            "Tus-Resumable": self.TUS_VERSION,
-            "Upload-Offset": str(offset),
-            "Content-Type": "application/offset+octet-stream",
-            "Content-Length": str(len(data)),
-            **self.headers,
-        }
-
-        # Add checksum if enabled
-        if self.checksum:
-            checksum_bytes = hashlib.sha1(data).digest()
-            checksum_b64 = base64.b64encode(checksum_bytes).decode("ascii")
-            headers["Upload-Checksum"] = f"sha1 {checksum_b64}"
-
-        try:
-            req = Request(upload_url, data=data, headers=headers, method="PATCH")
-            with urlopen(req):
-                pass
-        except HTTPError as e:
-            raise TusUploadFailed(
-                f"Failed to upload chunk at offset {offset}: {e.reason}",
-                status_code=e.code,
-                response_content=e.read(),
-            ) from e
-
     def get_file_size(self, file_source: Union[str, IO]) -> int:
         """
         Get the size of a file.
@@ -378,6 +318,13 @@ class TusClient:
 
         Returns:
             File stream object
+
+        Note:
+            If file_source is a file path, this method opens the file and returns
+            a file handle. The caller is responsible for closing the file handle
+            when done. Consider using a context manager:
+            >>> with client.get_file_stream("file.txt") as f:
+            ...     # use f
         """
         if isinstance(file_source, str):
             return open(file_source, "rb")
@@ -452,16 +399,14 @@ class TusClient:
                         try:
                             decoded_value = base64.b64decode(value).decode(self.metadata_encoding)
                             metadata[key] = decoded_value
-                        except Exception:
+                        except (ValueError, UnicodeDecodeError):
                             # If decoding fails, use raw value
                             metadata[key] = value
 
                 return metadata
         except HTTPError as e:
             raise TusCommunicationError(
-                f"Failed to get metadata: {e.reason}",
-                status_code=e.code,
-                response_content=e.read(),
+                f"Failed to get metadata: {str(e)}",
             ) from e
 
     def get_upload_info(self, upload_url: str) -> dict[str, Any]:
@@ -514,7 +459,7 @@ class TusClient:
                                     self.metadata_encoding
                                 )
                                 metadata[key] = decoded_value
-                            except Exception:
+                            except (ValueError, UnicodeDecodeError):
                                 metadata[key] = value
 
                 return {
@@ -525,9 +470,7 @@ class TusClient:
                 }
         except HTTPError as e:
             raise TusCommunicationError(
-                f"Failed to get upload info: {e.reason}",
-                status_code=e.code,
-                response_content=e.read(),
+                f"Failed to get upload info: {str(e)}",
             ) from e
 
     def get_server_info(self) -> dict[str, Union[str, list[str], Optional[int]]]:
@@ -571,9 +514,7 @@ class TusClient:
                 }
         except HTTPError as e:
             raise TusCommunicationError(
-                f"Failed to get server info: {e.reason}",
-                status_code=e.code,
-                response_content=e.read(),
+                f"Failed to get server info: {str(e)}",
             ) from e
 
     def create_uploader(
@@ -583,7 +524,7 @@ class TusClient:
         upload_url: Optional[str] = None,
         metadata: Optional[dict[str, str]] = None,
         chunk_size: Optional[Union[int, float]] = None,
-    ):
+    ) -> Uploader:
         """Create an Uploader instance for fine-grained upload control.
 
         Args:
@@ -607,7 +548,6 @@ class TusClient:
             >>> uploader.upload_chunk()  # Upload single chunk
             >>> uploader.upload()  # Upload remaining chunks
         """
-        from resumable_upload.client.uploader import Uploader
 
         # Get file size
         if file_stream:
@@ -636,4 +576,6 @@ class TusClient:
             checksum=self.checksum,
             metadata_encoding=self.metadata_encoding,
             headers=self.headers.copy(),
+            max_retries=self.max_retries,
+            retry_delay=self.retry_delay,
         )

@@ -3,10 +3,13 @@
 import base64
 import hashlib
 import os
+import time
+from threading import Lock
 from typing import IO, Callable, Optional, Union
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from resumable_upload.client.stats import UploadStats
 from resumable_upload.exceptions import TusCommunicationError, TusUploadFailed
 
 
@@ -45,6 +48,8 @@ class Uploader:
         checksum: bool = True,
         metadata_encoding: str = "utf-8",
         headers: Optional[dict[str, str]] = None,
+        max_retries: int = 0,
+        retry_delay: float = 1.0,
     ):
         """Initialize TUS uploader.
 
@@ -56,6 +61,8 @@ class Uploader:
             checksum: Enable checksum verification (default: True)
             metadata_encoding: Encoding for metadata values (default: utf-8)
             headers: Optional custom headers to include in all requests
+            max_retries: Maximum retry attempts for failed chunks (default: 0, disabled)
+            retry_delay: Base delay between retry attempts in seconds (default: 1.0)
 
         Raises:
             ValueError: If neither file_path nor file_stream provided, or chunk_size < 1
@@ -76,8 +83,10 @@ class Uploader:
         self.checksum = checksum
         self.metadata_encoding = metadata_encoding
         self.headers = headers or {}
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
-        # Initialize file stream
+        # Initialize file stream and get file size
         if file_stream:
             self._file_handle = file_stream
             self._owns_file = False
@@ -89,9 +98,16 @@ class Uploader:
             self._owns_file = True
             self.file_size = os.path.getsize(file_path)
 
+        # Statistics tracking (must be after file_size is set)
+        self._stats = UploadStats(total_bytes=self.file_size)
+        self.stats_lock = Lock()
+
         # Get current offset from server
         self.offset = self._get_offset()
         self._file_handle.seek(self.offset)
+
+        # Initialize stats with current offset (for already started uploads)
+        self._update_stats_after_chunk()
 
     def __enter__(self):
         """Context manager entry."""
@@ -122,13 +138,24 @@ class Uploader:
                 return int(offset)
         except HTTPError as e:
             raise TusCommunicationError(
-                f"Failed to get offset: {e.reason}",
-                status_code=e.code,
-                response_content=e.read(),
+                f"Failed to get offset: {str(e)}",
             ) from e
 
     def _upload_chunk(self, data: bytes) -> None:
-        """Upload a chunk of data."""
+        """Upload a chunk of data with optional retry logic.
+
+        After successful upload, self.offset will be updated.
+        Stats are automatically updated after successful upload.
+        """
+        if self.max_retries > 0:
+            self._upload_chunk_with_retry(data)
+        else:
+            self._upload_chunk_once(data)
+            # Update stats after successful upload
+            self._update_stats_after_chunk()
+
+    def _upload_chunk_once(self, data: bytes) -> None:
+        """Upload a chunk of data (single attempt)."""
         headers = {
             "Tus-Resumable": self.TUS_VERSION,
             "Upload-Offset": str(self.offset),
@@ -154,10 +181,56 @@ class Uploader:
                     self.offset += len(data)
         except HTTPError as e:
             raise TusUploadFailed(
-                f"Failed to upload chunk at offset {self.offset}: {e.reason}",
-                status_code=e.code,
-                response_content=e.read(),
+                f"Failed to upload chunk at offset {self.offset}: {str(e)}",
             ) from e
+
+    def _update_stats_after_chunk(self) -> None:
+        """Update statistics after a chunk is successfully uploaded.
+
+        This method should be called after self.offset has been updated
+        to reflect the new upload position.
+        """
+        with self.stats_lock:
+            # uploaded_bytes should always match offset
+            self._stats.uploaded_bytes = self.offset
+
+            # Calculate chunks_completed based on current offset
+            # This gives us the number of complete chunks uploaded so far
+            # offset=0 means 0 chunks, offset=chunk_size means 1 chunk, etc.
+            self._stats.chunks_completed = self.offset // self.chunk_size
+
+    def _upload_chunk_with_retry(self, data: bytes) -> None:
+        """Upload a chunk of data with retry logic."""
+        last_error: Optional[Exception] = None
+
+        for attempt in range(self.max_retries + 1):  # +1 for initial attempt
+            try:
+                self._upload_chunk_once(data)
+                # Track retry if this was a retry attempt
+                if attempt > 0:
+                    with self.stats_lock:
+                        self._stats.chunks_retried += 1
+                # Update stats after successful upload
+                self._update_stats_after_chunk()
+                return  # Success
+            except (HTTPError, URLError, OSError) as e:
+                last_error = e
+                if attempt < self.max_retries:
+                    # Exponential backoff
+                    delay = self.retry_delay * (2**attempt)
+                    time.sleep(delay)
+                else:
+                    # All retries failed
+                    with self.stats_lock:
+                        self._stats.chunks_failed += 1
+                    raise TusUploadFailed(
+                        f"Failed to upload chunk at offset {self.offset} "
+                        f"after {self.max_retries + 1} attempts: {str(e)}",
+                    ) from e
+
+        # Should not reach here, but just in case
+        error_msg = str(last_error) if last_error else "Unknown error"
+        raise TusUploadFailed(f"Failed to upload chunk at offset {self.offset}: {error_msg}")
 
     def upload_chunk(self) -> bool:
         """Upload a single chunk.
@@ -179,20 +252,20 @@ class Uploader:
         if not chunk:
             return False
 
-        # Upload chunk
+        # Upload chunk (stats are automatically updated inside _upload_chunk)
         self._upload_chunk(chunk)
 
         return self.offset < self.file_size
 
     def upload(
         self,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
+        progress_callback: Optional[Callable[[UploadStats], None]] = None,
         stop_at: Optional[int] = None,
     ) -> str:
         """Upload the entire file or remaining chunks.
 
         Args:
-            progress_callback: Optional callback function(uploaded_bytes, total_bytes)
+            progress_callback: Optional callback function that receives UploadStats
             stop_at: Stop upload at this byte offset (for partial uploads)
 
         Returns:
@@ -211,21 +284,31 @@ class Uploader:
             if not chunk:
                 break
 
+            # Upload chunk (stats are automatically updated inside _upload_chunk)
             self._upload_chunk(chunk)
 
             if progress_callback:
-                progress_callback(self.offset, self.file_size)
+                progress_callback(self.stats)
 
         return self.url
 
     @property
-    def progress(self) -> tuple[int, int]:
-        """Get current upload progress.
+    def stats(self) -> UploadStats:
+        """Get upload statistics.
 
         Returns:
-            Tuple of (uploaded_bytes, total_bytes)
+            UploadStats object with current upload statistics (read-only copy)
         """
-        return (self.offset, self.file_size)
+        with self.stats_lock:
+            # Return a copy to prevent external modification
+            return UploadStats(
+                total_bytes=self._stats.total_bytes,
+                uploaded_bytes=self._stats.uploaded_bytes,
+                chunks_completed=self._stats.chunks_completed,
+                chunks_failed=self._stats.chunks_failed,
+                chunks_retried=self._stats.chunks_retried,
+                start_time=self._stats.start_time,
+            )
 
     @property
     def is_complete(self) -> bool:

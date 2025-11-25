@@ -72,30 +72,6 @@ Command-line client for uploading files.
 python examples/client_example.py http://localhost:8080/files /path/to/file.bin
 ```
 
-### 6. Advanced Client Example (`advanced_client_example.py`)
-
-Enhanced client with retry logic, detailed progress tracking, and robust error handling.
-
-**Usage:**
-```bash
-python examples/advanced_client_example.py http://localhost:8080/files /path/to/file.bin [chunk_size_mb]
-```
-
-**Features:**
-- Automatic retry with exponential backoff (configurable max retries)
-- SHA1 checksum verification for data integrity
-- Detailed progress tracking with upload speed and ETA
-- Comprehensive error handling and logging
-- Configurable chunk size
-
-**Example:**
-```bash
-# Upload with 2MB chunks
-python examples/advanced_client_example.py http://localhost:8080/files large_file.bin 2
-```
-
-**Note:** The TUS protocol requires chunks to be uploaded sequentially (not in parallel) because each chunk must be uploaded at the correct offset. The server validates that the Upload-Offset header matches the current file position.
-
 ## Common Features
 
 All server examples include:

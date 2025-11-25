@@ -162,18 +162,28 @@ class TestPythonCompatibility:
             metadata = {"filename": "test2.bin"}
             upload_url2 = client._create_upload(os.path.getsize(test_file2), metadata)
 
-            # Get offset (should be 0)
-            offset = client._get_offset(upload_url2)
-            assert offset == 0, f"Expected offset 0, got {offset}"
+            # Get upload info (should be at offset 0)
+            info = client.get_upload_info(upload_url2)
+            assert info["offset"] == 0, f"Expected offset 0, got {info['offset']}"
 
-            # Upload partial data
-            with open(test_file2, "rb") as f:
-                chunk = f.read(100)
-                client._upload_chunk(upload_url2, 0, chunk)
+            # Upload partial data using Uploader
+            from resumable_upload.client.uploader import Uploader
 
-            # Check offset updated
-            offset = client._get_offset(upload_url2)
-            assert offset == 100, f"Expected offset 100, got {offset}"
+            uploader = Uploader(
+                url=upload_url2,
+                file_path=test_file2,
+                chunk_size=100,
+                max_retries=0,  # Disable retry for this test
+            )
+            try:
+                # Upload first chunk
+                uploader.upload_chunk()
+
+                # Check offset updated
+                info = client.get_upload_info(upload_url2)
+                assert info["offset"] == 100, f"Expected offset 100, got {info['offset']}"
+            finally:
+                uploader.close()
 
             server.shutdown()
         finally:

@@ -1,5 +1,7 @@
 """TUS protocol server implementation."""
 
+import base64
+import binascii
 import hashlib
 import logging
 import uuid
@@ -161,10 +163,8 @@ class TusServer:
                     key, value = pair.split(" ", 1)
                     # Decode base64 value
                     try:
-                        import base64
-
                         metadata[key] = base64.b64decode(value).decode("utf-8")
-                    except Exception:
+                    except (ValueError, UnicodeDecodeError):
                         metadata[key] = value
 
         # Generate upload ID
@@ -202,6 +202,18 @@ class TusServer:
             "Upload-Length": str(upload["upload_length"]),
             "Cache-Control": "no-store",
         }
+
+        # Include metadata if present
+        metadata = upload.get("metadata", {})
+        if metadata:
+            import base64
+
+            encoded_metadata = []
+            for key, value in metadata.items():
+                value_bytes = value.encode("utf-8")
+                encoded_value = base64.b64encode(value_bytes).decode("ascii")
+                encoded_metadata.append(f"{key} {encoded_value}")
+            response_headers["Upload-Metadata"] = ",".join(encoded_metadata)
 
         return (200, response_headers, b"")
 
@@ -245,13 +257,11 @@ class TusServer:
                 algo, checksum = upload_checksum.split(" ", 1)
                 if algo == "sha1":
                     computed = hashlib.sha1(body).hexdigest()
-                    import base64
-
                     provided = base64.b64decode(checksum).hex()
                     if computed != provided:
                         logger.error(f"Checksum mismatch for upload {upload_id}")
                         return (460, {}, b"Checksum mismatch")
-            except Exception as e:
+            except (ValueError, binascii.Error) as e:
                 logger.error(f"Invalid Upload-Checksum header: {e}")
                 return (400, {}, b"Invalid Upload-Checksum header")
 

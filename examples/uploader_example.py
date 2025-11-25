@@ -62,8 +62,11 @@ def main():
     chunk_count = 0
     while uploader.upload_chunk():
         chunk_count += 1
-        uploaded, total = uploader.progress
-        print(f"Chunk {chunk_count}: {uploaded}/{total} bytes ({uploaded / total * 100:.1f}%)")
+        stats = uploader.stats
+        print(
+            f"Chunk {chunk_count}: {stats.uploaded_bytes}/{stats.total_bytes} bytes "
+            f"({stats.progress_percent:.1f}%)"
+        )
         # Simulate doing other work between chunks
         time.sleep(0.1)
 
@@ -89,8 +92,8 @@ def main():
     # Upload a few chunks
     for i in range(3):
         if uploader.upload_chunk():
-            uploaded, total = uploader.progress
-            print(f"After chunk {i + 1}: {uploaded}/{total} bytes")
+            stats = uploader.stats
+            print(f"After chunk {i + 1}: {stats.uploaded_bytes}/{stats.total_bytes} bytes")
         else:
             print("Upload complete!")
             break
