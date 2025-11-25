@@ -77,6 +77,13 @@ def main():
         metadata = client.get_metadata(upload_url)
         print(f"Metadata: {metadata}")
 
+        # Example: Use Uploader for fine-grained control
+        print("\n=== Example: Using Uploader ===")
+        uploader = client.create_uploader(file_path, upload_url=upload_url)
+        print(f"Uploader offset: {uploader.offset}, file size: {uploader.file_size}")
+        print(f"Is complete: {uploader.is_complete}")
+        uploader.close()
+
     except Exception as e:
         print(f"Upload failed: {e}")
         sys.exit(1)

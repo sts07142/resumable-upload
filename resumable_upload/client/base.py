@@ -575,3 +575,65 @@ class TusClient:
                 status_code=e.code,
                 response_content=e.read(),
             ) from e
+
+    def create_uploader(
+        self,
+        file_path: Optional[str] = None,
+        file_stream: Optional[IO] = None,
+        upload_url: Optional[str] = None,
+        metadata: Optional[dict[str, str]] = None,
+        chunk_size: Optional[Union[int, float]] = None,
+    ):
+        """Create an Uploader instance for fine-grained upload control.
+
+        Args:
+            file_path: Path to file to upload (required if file_stream not provided)
+            file_stream: File stream to upload (alternative to file_path)
+            upload_url: Existing upload URL (if None, creates new upload)
+            metadata: Optional metadata dictionary (only used if creating new upload)
+            chunk_size: Optional chunk size override
+
+        Returns:
+            Uploader instance
+
+        Raises:
+            ValueError: If neither file_path nor file_stream provided
+            FileNotFoundError: If file doesn't exist
+            TusCommunicationError: If upload creation fails
+
+        Example:
+            >>> client = TusClient("http://localhost:8080/files")
+            >>> uploader = client.create_uploader("file.bin")
+            >>> uploader.upload_chunk()  # Upload single chunk
+            >>> uploader.upload()  # Upload remaining chunks
+        """
+        from resumable_upload.client.uploader import Uploader
+
+        # Get file size
+        if file_stream:
+            file_stream.seek(0, os.SEEK_END)
+            file_size = file_stream.tell()
+            file_stream.seek(0)
+        else:
+            if not file_path or not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
+            file_size = os.path.getsize(file_path)
+
+        # Create upload if URL not provided
+        if not upload_url:
+            metadata = metadata or {}
+            if "filename" not in metadata and file_path:
+                metadata["filename"] = os.path.basename(file_path)
+            upload_url = self._create_upload(file_size, metadata)
+
+        # Create uploader
+        actual_chunk_size = chunk_size if chunk_size is not None else self.chunk_size
+        return Uploader(
+            url=upload_url,
+            file_path=file_path,
+            file_stream=file_stream,
+            chunk_size=actual_chunk_size,
+            checksum=self.checksum,
+            metadata_encoding=self.metadata_encoding,
+            headers=self.headers.copy(),
+        )
