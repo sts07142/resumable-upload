@@ -2,10 +2,14 @@
 """FastAPI integration example for TUS server.
 
 Install: pip install fastapi uvicorn
-Run    : python examples/fastapi_example.py
+Run    : python examples/fastapi_example.py [port]
+
+    python examples/fastapi_example.py        # default port 8000
+    python examples/fastapi_example.py 9000   # custom port
 """
 
 import logging
+import sys
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -24,9 +28,9 @@ tus_server = TusServer(
     storage=storage,
     base_path="/files",
     max_size=100 * 1024 * 1024,  # 100 MB
-    upload_expiry=3600,           # 1 hour
-    cleanup_interval=300,         # clean up every 5 minutes
-    cors_allow_origins="*",       # restrict in production
+    upload_expiry=3600,  # 1 hour
+    cleanup_interval=300,  # clean up every 5 minutes
+    cors_allow_origins="*",  # restrict in production
 )
 
 
@@ -52,8 +56,9 @@ async def manage_upload(upload_id: str, request: Request):
 
 
 if __name__ == "__main__":
-    print("TUS server (FastAPI) running on http://localhost:8000")
-    print("Upload endpoint: http://localhost:8000/files")
-    print("API docs: http://localhost:8000/docs")
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    print(f"TUS server (FastAPI) running on http://localhost:{port}")
+    print(f"Upload endpoint: http://localhost:{port}/files")
+    print(f"API docs: http://localhost:{port}/docs")
     print("Press Ctrl+C to stop")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

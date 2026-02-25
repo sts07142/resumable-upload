@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
-"""Example TUS server using Python's built-in http.server."""
+"""Example TUS server using Python's built-in http.server.
+
+Usage:
+    python examples/server_example.py [port]
+
+    python examples/server_example.py        # default port 8080
+    python examples/server_example.py 9000   # custom port
+"""
 
 import logging
+import sys
 from http.server import HTTPServer
 
 from resumable_upload import TusHTTPRequestHandler, TusServer
@@ -9,6 +17,8 @@ from resumable_upload.storage import SQLiteStorage
 
 
 def main():
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -19,10 +29,10 @@ def main():
     tus_server = TusServer(
         storage=storage,
         base_path="/files",
-        max_size=100 * 1024 * 1024,   # 100 MB upload limit
-        upload_expiry=3600,            # Uploads expire after 1 hour
-        cleanup_interval=300,          # Clean up expired uploads every 5 minutes
-        cors_allow_origins="*",        # Allow all origins (restrict in production)
+        max_size=100 * 1024 * 1024,  # 100 MB upload limit
+        upload_expiry=3600,  # Uploads expire after 1 hour
+        cleanup_interval=300,  # Clean up expired uploads every 5 minutes
+        cors_allow_origins="*",  # Allow all origins (restrict in production)
     )
 
     class Handler(TusHTTPRequestHandler):
@@ -30,8 +40,7 @@ def main():
 
     Handler.tus_server = tus_server
 
-    host, port = "0.0.0.0", 8080
-    server = HTTPServer((host, port), Handler)
+    server = HTTPServer(("0.0.0.0", port), Handler)
     print(f"TUS server running on http://localhost:{port}")
     print(f"Upload endpoint: http://localhost:{port}/files")
     print("Press Ctrl+C to stop")

@@ -2,7 +2,10 @@
 """Django integration example for TUS server.
 
 Install: pip install django
-Run    : python examples/django_example.py
+Run    : python examples/django_example.py [port]
+
+    python examples/django_example.py        # default port 8000
+    python examples/django_example.py 9000   # custom port
 
 To integrate into an existing Django project:
   1. Copy tus_upload_view() into your views.py
@@ -28,9 +31,9 @@ tus_server = TusServer(
     storage=storage,
     base_path="/files",
     max_size=100 * 1024 * 1024,  # 100 MB
-    upload_expiry=3600,           # 1 hour
-    cleanup_interval=300,         # clean up every 5 minutes
-    cors_allow_origins="*",       # restrict in production
+    upload_expiry=3600,  # 1 hour
+    cleanup_interval=300,  # clean up every 5 minutes
+    cors_allow_origins="*",  # restrict in production
 )
 
 
@@ -69,11 +72,15 @@ def tus_upload_view(request, upload_id=None):
 
 # ── Standalone runner ────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import sys
+
     import django
     from django.conf import settings
     from django.core.servers.basehttp import WSGIRequestHandler, WSGIServer
     from django.core.wsgi import get_wsgi_application
     from django.urls import path
+
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
 
     settings.configure(
         DEBUG=True,
@@ -89,12 +96,12 @@ if __name__ == "__main__":
         path("files/<str:upload_id>", tus_upload_view),
     ]
 
-    print("TUS server (Django) running on http://localhost:8000")
-    print("Upload endpoint: http://localhost:8000/files")
+    print(f"TUS server (Django) running on http://localhost:{port}")
+    print(f"Upload endpoint: http://localhost:{port}/files")
     print("Press Ctrl+C to stop")
 
     application = get_wsgi_application()
-    server = WSGIServer(("0.0.0.0", 8000), WSGIRequestHandler)
+    server = WSGIServer(("0.0.0.0", port), WSGIRequestHandler)
     server.set_app(application)
     try:
         server.serve_forever()

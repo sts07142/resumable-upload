@@ -2,10 +2,14 @@
 """Flask integration example for TUS server.
 
 Install: pip install flask
-Run    : python examples/flask_example.py
+Run    : python examples/flask_example.py [port]
+
+    python examples/flask_example.py        # default port 5000
+    python examples/flask_example.py 9000   # custom port
 """
 
 import logging
+import sys
 
 from flask import Flask, make_response, request
 
@@ -23,9 +27,9 @@ tus_server = TusServer(
     storage=storage,
     base_path="/files",
     max_size=100 * 1024 * 1024,  # 100 MB
-    upload_expiry=3600,           # 1 hour
-    cleanup_interval=300,         # clean up every 5 minutes
-    cors_allow_origins="*",       # restrict in production
+    upload_expiry=3600,  # 1 hour
+    cleanup_interval=300,  # clean up every 5 minutes
+    cors_allow_origins="*",  # restrict in production
 )
 
 
@@ -42,7 +46,8 @@ def handle_upload(upload_id=None):
 
 
 if __name__ == "__main__":
-    print("TUS server (Flask) running on http://localhost:5000")
-    print("Upload endpoint: http://localhost:5000/files")
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
+    print(f"TUS server (Flask) running on http://localhost:{port}")
+    print(f"Upload endpoint: http://localhost:{port}/files")
     print("Press Ctrl+C to stop")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)

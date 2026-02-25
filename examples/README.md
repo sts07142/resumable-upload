@@ -7,6 +7,7 @@ Runnable examples for the resumable-upload library.
 ```bash
 # 1. Start a server (choose one)
 python examples/server_example.py        # built-in http.server  → :8080
+python examples/server_example.py 9000   # custom port           → :9000
 python examples/flask_example.py         # Flask                 → :5000
 python examples/fastapi_example.py       # FastAPI               → :8000
 python examples/django_example.py        # Django                → :8000
@@ -29,7 +30,8 @@ python examples/uploader_example.py http://localhost:8080/files /tmp/test.bin
 Zero-dependency server using Python's `http.server`.
 
 ```bash
-python examples/server_example.py
+python examples/server_example.py           # → :8080
+python examples/server_example.py 9000      # → :9000
 ```
 
 Features: 100 MB limit · 1 h upload expiry · 5 min cleanup · CORS enabled
@@ -40,7 +42,8 @@ Features: 100 MB limit · 1 h upload expiry · 5 min cleanup · CORS enabled
 
 ```bash
 pip install flask
-python examples/flask_example.py      # → http://localhost:5000/files
+python examples/flask_example.py           # → :5000
+python examples/flask_example.py 9000      # → :9000
 ```
 
 ---
@@ -49,8 +52,8 @@ python examples/flask_example.py      # → http://localhost:5000/files
 
 ```bash
 pip install fastapi uvicorn
-python examples/fastapi_example.py    # → http://localhost:8000/files
-                                      #   http://localhost:8000/docs
+python examples/fastapi_example.py         # → :8000  (docs at /docs)
+python examples/fastapi_example.py 9000    # → :9000
 ```
 
 ---
@@ -59,7 +62,8 @@ python examples/fastapi_example.py    # → http://localhost:8000/files
 
 ```bash
 pip install django
-python examples/django_example.py     # → http://localhost:8000/files
+python examples/django_example.py          # → :8000
+python examples/django_example.py 9000     # → :9000
 ```
 
 **Integrating into an existing Django project:**
