@@ -60,7 +60,7 @@ class TestFingerprint:
             assert fp1 == fp2
             # Fingerprint should contain size and MD5
             assert "size:" in fp1
-            assert "--md5:" in fp1
+            assert "--sha256:" in fp1
         finally:
             os.unlink(temp_path)
 
@@ -80,7 +80,7 @@ class TestFingerprint:
                 assert stream.tell() == original_pos
 
             assert "size:" in fp
-            assert "--md5:" in fp
+            assert "--sha256:" in fp
         finally:
             os.unlink(temp_path)
 
@@ -118,6 +118,26 @@ class TestFingerprint:
             assert "size:12345" in fp
         finally:
             os.unlink(temp_path)
+
+
+    def test_fingerprint_differs_for_files_with_same_first_64kb(self):
+        """Files differing only after the first 64KB get distinct fingerprints."""
+        block = b"x" * (64 * 1024)  # exactly 64KB prefix
+        with tempfile.NamedTemporaryFile(delete=False) as f1:
+            f1.write(block + b"AAAA")
+            path1 = f1.name
+        with tempfile.NamedTemporaryFile(delete=False) as f2:
+            f2.write(block + b"BBBB")
+            path2 = f2.name
+
+        try:
+            fingerprinter = Fingerprint()
+            fp1 = fingerprinter.get_fingerprint(path1)
+            fp2 = fingerprinter.get_fingerprint(path2)
+            assert fp1 != fp2
+        finally:
+            os.unlink(path1)
+            os.unlink(path2)
 
 
 class TestURLStorage:
