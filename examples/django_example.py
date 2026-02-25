@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Django integration example for TUS server.
 
-To use this example:
-1. Install Django: pip install django
-2. Create a Django project: django-admin startproject myproject
-3. Add this view to your urls.py
-4. Run: python manage.py runserver
+Install: pip install django
+Run    : python examples/django_example.py
+
+To integrate into an existing Django project:
+  1. Copy tus_upload_view() into your views.py
+  2. Wire up URLs as shown in the urlpatterns block below
 """
 
 import logging
@@ -16,14 +17,21 @@ from django.views.decorators.http import require_http_methods
 
 from resumable_upload import SQLiteStorage, TusServer
 
-# Configure logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
-# Create TUS server (should be created once, ideally in settings or app config)
+# Create once at module level (or inject via Django app config / settings)
 storage = SQLiteStorage(db_path="uploads.db", upload_dir="uploads")
-tus_server = TusServer(storage=storage, base_path="/files", max_size=100 * 1024 * 1024)
+tus_server = TusServer(
+    storage=storage,
+    base_path="/files",
+    max_size=100 * 1024 * 1024,  # 100 MB
+    upload_expiry=3600,           # 1 hour
+    cleanup_interval=300,         # clean up every 5 minutes
+    cors_allow_origins="*",       # restrict in production
+)
 
 
 @csrf_exempt
@@ -31,44 +39,35 @@ tus_server = TusServer(storage=storage, base_path="/files", max_size=100 * 1024 
 def tus_upload_view(request, upload_id=None):
     """Handle TUS upload requests.
 
-    Add to urls.py:
+    urls.py:
         from .views import tus_upload_view
-
         urlpatterns = [
-            path('files', tus_upload_view, name='tus-create'),
-            path('files/<str:upload_id>', tus_upload_view, name='tus-upload'),
+            path("files", tus_upload_view, name="tus-create"),
+            path("files/<str:upload_id>", tus_upload_view, name="tus-upload"),
         ]
     """
-    # Get path
-    path = request.path
-
-    # Get headers as dict
-    headers = {key: value for key, value in request.META.items() if key.startswith("HTTP_")}
-    # Convert HTTP_X_Y format to X-Y format
-    headers = {key[5:].replace("_", "-"): value for key, value in headers.items()}
-    # Add Content-Type and Content-Length
+    # Django stores HTTP headers as HTTP_<HEADER> in META; normalise to Header-Name form.
+    headers = {
+        key[5:].replace("_", "-"): value
+        for key, value in request.META.items()
+        if key.startswith("HTTP_")
+    }
     if request.META.get("CONTENT_TYPE"):
         headers["Content-Type"] = request.META["CONTENT_TYPE"]
     if request.META.get("CONTENT_LENGTH"):
         headers["Content-Length"] = request.META["CONTENT_LENGTH"]
 
-    # Get body
-    body = request.body
-
-    # Handle request
-    status, response_headers, response_body = tus_server.handle_request(
-        request.method, path, headers, body
+    status, resp_headers, body = tus_server.handle_request(
+        request.method, request.path, headers, request.body
     )
 
-    # Create response
-    response = HttpResponse(response_body, status=status)
-    for key, value in response_headers.items():
+    response = HttpResponse(body, status=status)
+    for key, value in resp_headers.items():
         response[key] = value
-
     return response
 
 
-# Example standalone script for testing
+# ── Standalone runner ────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import django
     from django.conf import settings
@@ -76,38 +75,29 @@ if __name__ == "__main__":
     from django.core.wsgi import get_wsgi_application
     from django.urls import path
 
-    # Configure Django settings
     settings.configure(
         DEBUG=True,
-        SECRET_KEY="django-insecure-test-key-for-example-only",
+        SECRET_KEY="django-insecure-example-key",
         ROOT_URLCONF=__name__,
         ALLOWED_HOSTS=["*"],
-        MIDDLEWARE=[
-            "django.middleware.common.CommonMiddleware",
-        ],
+        MIDDLEWARE=["django.middleware.common.CommonMiddleware"],
     )
-
-    # Setup Django
     django.setup()
 
-    # URL patterns
     urlpatterns = [
         path("files", tus_upload_view),
         path("files/<str:upload_id>", tus_upload_view),
     ]
 
-    print("TUS Server with Django running on http://0.0.0.0:8000")
-    print("Upload endpoint: http://0.0.0.0:8000/files")
+    print("TUS server (Django) running on http://localhost:8000")
+    print("Upload endpoint: http://localhost:8000/files")
     print("Press Ctrl+C to stop")
 
-    # Get WSGI application
     application = get_wsgi_application()
-
-    # Run development server directly
     server = WSGIServer(("0.0.0.0", 8000), WSGIRequestHandler)
     server.set_app(application)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down server...")
+        print("\nShutting down...")
         server.shutdown()

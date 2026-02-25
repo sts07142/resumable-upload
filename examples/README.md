@@ -1,145 +1,159 @@
 # Examples
 
-This directory contains example implementations of the resumable upload library with various web frameworks.
+Runnable examples for the resumable-upload library.
 
-## Available Examples
+## Quick Start
 
-### 1. Standard HTTP Server (`server_example.py`)
+```bash
+# 1. Start a server (choose one)
+python examples/server_example.py        # built-in http.server  → :8080
+python examples/flask_example.py         # Flask                 → :5000
+python examples/fastapi_example.py       # FastAPI               → :8000
+python examples/django_example.py        # Django                → :8000
 
-Basic implementation using Python's built-in `http.server` module.
+# 2. Create a test file
+dd if=/dev/urandom of=/tmp/test.bin bs=1M count=20
 
-**Usage:**
+# 3. Upload
+python examples/client_example.py   http://localhost:8080/files /tmp/test.bin
+python examples/resume_example.py   http://localhost:8080/files /tmp/test.bin
+python examples/uploader_example.py http://localhost:8080/files /tmp/test.bin
+```
+
+---
+
+## Server Examples
+
+### `server_example.py` — Built-in HTTP server
+
+Zero-dependency server using Python's `http.server`.
+
 ```bash
 python examples/server_example.py
 ```
 
-**Requirements:** None (uses standard library)
+Features: 100 MB limit · 1 h upload expiry · 5 min cleanup · CORS enabled
 
-### 2. Flask Integration (`flask_example.py`)
+---
 
-Integration with Flask web framework.
+### `flask_example.py` — Flask
 
-**Usage:**
 ```bash
 pip install flask
-python examples/flask_example.py
+python examples/flask_example.py      # → http://localhost:5000/files
 ```
 
-**Features:**
-- Simple Flask routes
-- Request/response handling
-- Logging enabled
+---
 
-### 3. FastAPI Integration (`fastapi_example.py`)
+### `fastapi_example.py` — FastAPI
 
-Modern async integration with FastAPI.
-
-**Usage:**
 ```bash
 pip install fastapi uvicorn
-python examples/fastapi_example.py
+python examples/fastapi_example.py    # → http://localhost:8000/files
+                                      #   http://localhost:8000/docs
 ```
 
-**Features:**
-- Async request handling
-- Auto-generated API documentation at `/docs`
-- Type hints and validation
+---
 
-### 4. Django Integration (`django_example.py`)
+### `django_example.py` — Django
 
-Integration with Django web framework.
-
-**Usage:**
 ```bash
 pip install django
-python examples/django_example.py
+python examples/django_example.py     # → http://localhost:8000/files
 ```
 
-**Features:**
-- Django views and URL routing
-- CSRF exemption for uploads
-- Standalone runnable example
-
-**For existing Django project:**
-Add the view to your `views.py` and configure URLs as shown in the file comments.
-
-### 5. Client Example (`client_example.py`)
-
-Command-line client for uploading files.
-
-**Usage:**
-```bash
-python examples/client_example.py http://localhost:8080/files /path/to/file.bin
-```
-
-## Common Features
-
-All server examples include:
-- TUS protocol v1.0.0 support
-- SQLite storage backend
-- 100MB upload size limit
-- Comprehensive logging
-- Same API endpoints:
-  - `POST /files` - Create upload
-  - `HEAD /files/{id}` - Get upload status
-  - `PATCH /files/{id}` - Upload data
-  - `DELETE /files/{id}` - Delete upload
-
-## Testing Examples
-
-### Start a Server
-```bash
-# Choose one:
-python examples/server_example.py      # Standard HTTP (port 8080)
-python examples/flask_example.py       # Flask (port 5000)
-python examples/fastapi_example.py     # FastAPI (port 8000)
-python examples/django_example.py      # Django (port 8000)
-```
-
-### Upload a File
-```bash
-# Create a test file
-dd if=/dev/urandom of=test.bin bs=1M count=10
-
-# Upload using basic client
-python examples/client_example.py http://localhost:8080/files test.bin
-
-# Upload using advanced client with retries
-python examples/advanced_client_example.py http://localhost:8080/files test.bin 1
-```
-
-## Logging
-
-All examples include logging configured at INFO level. You can adjust the logging level in each example:
+**Integrating into an existing Django project:**
 
 ```python
-logging.basicConfig(
-    level=logging.DEBUG,  # Change to DEBUG for more details
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# views.py  — copy tus_upload_view from the example
+
+# urls.py
+from django.urls import path
+from .views import tus_upload_view
+
+urlpatterns = [
+    path("files", tus_upload_view, name="tus-create"),
+    path("files/<str:upload_id>", tus_upload_view, name="tus-upload"),
+]
 ```
 
-## Production Deployment
+---
 
-For production use:
+## Client Examples
 
-1. **Use a production WSGI/ASGI server:**
-   - Flask: `gunicorn` or `uwsgi`
-   - FastAPI: `uvicorn` with `--workers`
-   - Django: `gunicorn` or `uwsgi`
+### `client_example.py` — Basic upload
 
-2. **Configure proper storage:**
-   - Use a dedicated directory with appropriate permissions
-   - Consider using cloud storage for scalability
-   - Implement cleanup for expired uploads
+Uploads a file, inspects the result, and optionally deletes it.
 
-3. **Security considerations:**
-   - Add authentication/authorization
-   - Validate file types and sizes
-   - Use HTTPS
-   - Implement rate limiting
+```bash
+python examples/client_example.py <server_url> <file_path> [headers_json]
 
-4. **Monitoring:**
-   - Configure proper logging
-   - Monitor disk usage
-   - Track upload metrics
+# With authentication header
+python examples/client_example.py http://localhost:8080/files file.bin \
+    '{"Authorization": "Bearer my-token"}'
+```
+
+Features: progress bar · MB/s speed · `max_retries=3` · `timeout=30 s` · delete prompt
+
+---
+
+### `resume_example.py` — Cross-session resumability
+
+Demonstrates uploads that survive process restarts.
+On the **first run** the upload starts from byte 0.
+On every **subsequent run** with the same file, the stored URL is reused and
+the upload continues from the last confirmed offset.
+
+```bash
+python examples/resume_example.py <server_url> <file_path>
+
+# Interrupt with Ctrl-C halfway, then run again to resume
+python examples/resume_example.py http://localhost:8080/files large.bin
+^C
+python examples/resume_example.py http://localhost:8080/files large.bin
+```
+
+The mapping `{ fingerprint → upload_url }` is stored in `.tus_resume_urls.json`.
+
+---
+
+### `uploader_example.py` — Fine-grained control
+
+Shows all `Uploader` use-cases: chunk-by-chunk, full upload, `is_complete`,
+`stop_at`, and resume.
+
+```bash
+python examples/uploader_example.py <server_url> <file_path> [upload_url]
+
+# Start fresh
+python examples/uploader_example.py http://localhost:8080/files file.bin
+
+# Resume at a known URL
+python examples/uploader_example.py http://localhost:8080/files file.bin \
+    http://localhost:8080/files/abc123
+```
+
+---
+
+## Common Configuration
+
+All server examples share the same configuration:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `max_size` | 100 MB | Maximum upload size |
+| `upload_expiry` | 3600 s | Uploads expire after 1 hour |
+| `cleanup_interval` | 300 s | Expired uploads cleaned every 5 min |
+| `cors_allow_origins` | `"*"` | CORS — restrict to specific origin in production |
+
+Adjust these values directly in each example file.
+
+---
+
+## Production Notes
+
+- **WSGI/ASGI**: use `gunicorn` (Flask/Django) or `uvicorn --workers N` (FastAPI)
+- **CORS**: replace `"*"` with your frontend origin
+- **Auth**: add an authentication middleware or check headers in the view
+- **Storage**: `SQLiteStorage` is single-process; replace with a custom backend for multi-process deployments
+- **HTTPS**: always terminate TLS in production; pass `verify_tls_cert=False` on the client only for self-signed certs in dev

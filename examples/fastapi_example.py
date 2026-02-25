@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""FastAPI integration example for TUS server."""
+"""FastAPI integration example for TUS server.
+
+Install: pip install fastapi uvicorn
+Run    : python examples/fastapi_example.py
+"""
 
 import logging
 
@@ -8,57 +12,48 @@ from fastapi import FastAPI, Request, Response
 
 from resumable_upload import SQLiteStorage, TusServer
 
-# Configure logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
-# Create FastAPI app
 app = FastAPI(title="TUS Upload Server")
 
-# Create TUS server
 storage = SQLiteStorage(db_path="uploads.db", upload_dir="uploads")
-tus_server = TusServer(storage=storage, base_path="/files", max_size=100 * 1024 * 1024)
+tus_server = TusServer(
+    storage=storage,
+    base_path="/files",
+    max_size=100 * 1024 * 1024,  # 100 MB
+    upload_expiry=3600,           # 1 hour
+    cleanup_interval=300,         # clean up every 5 minutes
+    cors_allow_origins="*",       # restrict in production
+)
+
+
+async def _handle(request: Request) -> Response:
+    body = await request.body()
+    status, resp_headers, resp_body = tus_server.handle_request(
+        request.method, request.url.path, dict(request.headers), body
+    )
+    return Response(content=resp_body, status_code=status, headers=resp_headers)
 
 
 @app.options("/files")
 @app.post("/files")
 async def create_upload(request: Request):
-    """Handle upload creation."""
-    return await handle_tus_request(request)
+    return await _handle(request)
 
 
 @app.head("/files/{upload_id}")
 @app.patch("/files/{upload_id}")
 @app.delete("/files/{upload_id}")
-async def handle_upload(upload_id: str, request: Request):
-    """Handle upload operations."""
-    return await handle_tus_request(request)
-
-
-async def handle_tus_request(request: Request):
-    """Process TUS request."""
-    # Get path
-    path = request.url.path
-
-    # Get headers as dict
-    headers = dict(request.headers)
-
-    # Get body
-    body = await request.body()
-
-    # Handle request
-    status, response_headers, response_body = tus_server.handle_request(
-        request.method, path, headers, body
-    )
-
-    # Create response
-    return Response(content=response_body, status_code=status, headers=response_headers)
+async def manage_upload(upload_id: str, request: Request):
+    return await _handle(request)
 
 
 if __name__ == "__main__":
-    print("TUS Server with FastAPI running on http://0.0.0.0:8000")
-    print("Upload endpoint: http://0.0.0.0:8000/files")
-    print("API docs: http://0.0.0.0:8000/docs")
+    print("TUS server (FastAPI) running on http://localhost:8000")
+    print("Upload endpoint: http://localhost:8000/files")
+    print("API docs: http://localhost:8000/docs")
     print("Press Ctrl+C to stop")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
