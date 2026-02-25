@@ -310,18 +310,41 @@ SQLite-based storage backend.
 
 ## 🔍 TUS Protocol Compliance
 
-This library implements TUS protocol version 1.0.0 with the following extensions:
+This library implements [TUS protocol v1.0.0](https://tus.io/protocols/resumable-upload.html).
 
-- ✅ **Core Protocol**: Basic upload functionality (POST, HEAD, PATCH)
-- ✅ **Creation**: Upload creation via POST
-- ✅ **Termination**: Upload deletion via DELETE
-- ✅ **Checksum**: SHA1 checksum verification
+### Extensions
+
+| Extension | Status | Notes |
+|-----------|--------|-------|
+| **core** | ✅ Implemented | POST / HEAD / PATCH, offset tracking, version negotiation |
+| **creation** | ✅ Implemented | Upload creation via POST with `Upload-Length` |
+| **creation-with-upload** | ✅ Implemented | Initial data in POST body |
+| **termination** | ✅ Implemented | Upload deletion via DELETE |
+| **checksum** | ✅ Implemented | SHA1 (`Upload-Checksum` header) |
+| **expiration** | ✅ Implemented | `Upload-Expires` header + server-side periodic cleanup |
+| **concatenation** | ❌ Not implemented | Combining parallel uploads |
+
+### Protocol Details
+
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| `Tus-Resumable` header on all responses | ✅ | |
+| `412` on version mismatch | ✅ | |
+| `415` on wrong `Content-Type` in PATCH | ✅ | |
+| `409` on `Upload-Offset` mismatch | ✅ | |
+| `410` on expired upload access | ✅ | |
+| `Cache-Control: no-store` in HEAD | ✅ | |
+| `Upload-Expires` in POST / HEAD / PATCH responses | ✅ | When expiry is configured |
+| `Tus-Checksum-Algorithm` in OPTIONS | ✅ | Reports `sha1` |
+| `Content-Length: 0` in client DELETE | ✅ | |
+| Malformed `Content-Length` → `400` | ✅ | |
+| Chunk overflow → `400` | ✅ | Prevents exceeding declared `Upload-Length` |
+| `X-HTTP-Method-Override` | ❌ Not implemented | For environments blocking PATCH/DELETE |
+| Deferred length (`Upload-Defer-Length`) | ❌ Not implemented | Part of creation extension |
 
 ### Sequential Upload Requirement
 
 **Important:** The TUS protocol requires chunks to be uploaded **sequentially**, not in parallel.
-
-**Why Sequential?**
 
 1. **Offset Validation**: Each chunk must be uploaded at the correct byte offset
 2. **Data Integrity**: Prevents data corruption from race conditions

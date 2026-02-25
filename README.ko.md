@@ -312,18 +312,41 @@ SQLite 기반 스토리지 백엔드입니다.
 
 ## 🔍 TUS 프로토콜 준수
 
-이 라이브러리는 다음 확장 기능을 포함한 TUS 프로토콜 버전 1.0.0을 구현합니다:
+이 라이브러리는 [TUS 프로토콜 v1.0.0](https://tus.io/protocols/resumable-upload.html)을 구현합니다.
 
-- ✅ **코어 프로토콜**: 기본 업로드 기능 (POST, HEAD, PATCH)
-- ✅ **Creation**: POST를 통한 업로드 생성
-- ✅ **Termination**: DELETE를 통한 업로드 삭제
-- ✅ **Checksum**: SHA1 체크섬 검증
+### 확장 기능
+
+| 확장 | 상태 | 비고 |
+|------|------|------|
+| **core** | ✅ 구현됨 | POST / HEAD / PATCH, 오프셋 추적, 버전 협상 |
+| **creation** | ✅ 구현됨 | `Upload-Length` 포함 POST로 업로드 생성 |
+| **creation-with-upload** | ✅ 구현됨 | POST 본문에 초기 데이터 포함 |
+| **termination** | ✅ 구현됨 | DELETE로 업로드 삭제 |
+| **checksum** | ✅ 구현됨 | SHA1 (`Upload-Checksum` 헤더); OPTIONS에서 `Tus-Checksum-Algorithm: sha1` 광고 |
+| **expiration** | ✅ 구현됨 | POST / HEAD / PATCH 응답에 `Upload-Expires`; 서버 측 주기적 정리 |
+| **concatenation** | ❌ 미구현 | 병렬 부분 업로드 결합 |
+
+### 프로토콜 세부 사항
+
+| 요구 사항 | 상태 | 비고 |
+|-----------|------|------|
+| 모든 응답에 `Tus-Resumable` 헤더 포함 | ✅ | |
+| 버전 불일치 시 `412` 반환 | ✅ | |
+| PATCH의 잘못된 `Content-Type` → `415` | ✅ | |
+| `Upload-Offset` 불일치 → `409` | ✅ | |
+| 만료된 업로드 접근 → `410` | ✅ | |
+| HEAD 응답에 `Cache-Control: no-store` | ✅ | |
+| POST / HEAD / PATCH 응답에 `Upload-Expires` | ✅ | 만료 설정 시 |
+| OPTIONS에 `Tus-Checksum-Algorithm` | ✅ | `sha1` 보고 |
+| 클라이언트 DELETE에 `Content-Length: 0` | ✅ | |
+| 잘못된 `Content-Length` → `400` | ✅ | |
+| 청크 초과 → `400` | ✅ | 선언된 `Upload-Length` 초과 방지 |
+| `X-HTTP-Method-Override` | ❌ 미구현 | PATCH/DELETE 차단 환경용 |
+| `Upload-Defer-Length` (지연 길이) | ❌ 미구현 | creation 확장의 일부 |
 
 ### 순차적 업로드 요구사항
 
 **중요:** TUS 프로토콜은 청크를 **순차적으로** 업로드해야 하며, 병렬로 업로드할 수 없습니다.
-
-**왜 순차적인가?**
 
 1. **오프셋 검증**: 각 청크는 올바른 바이트 오프셋에 업로드되어야 합니다
 2. **데이터 무결성**: 경쟁 조건으로 인한 데이터 손상을 방지합니다

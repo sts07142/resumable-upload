@@ -1,164 +1,94 @@
 # TUS Protocol Compliance
 
-This document explains how this library implements the TUS resumable upload protocol and its version handling.
+This document details the compliance status of this library against the [TUS resumable upload protocol v1.0.0](https://tus.io/protocols/resumable-upload.html).
 
-## TUS Protocol Version
+## Extensions
 
-This library implements **TUS Protocol version 1.0.0** as specified at:
-https://tus.io/protocols/resumable-upload.html
+| Extension | Status | Notes |
+|-----------|--------|-------|
+| **core** | ✅ Implemented | POST / HEAD / PATCH, offset tracking, version negotiation |
+| **creation** | ✅ Implemented | Upload creation via POST with `Upload-Length` |
+| **creation-with-upload** | ✅ Implemented | Initial data in POST body (`Content-Type: application/offset+octet-stream`) |
+| **termination** | ✅ Implemented | Upload deletion via DELETE |
+| **checksum** | ✅ Implemented | SHA1 (`Upload-Checksum` header); `Tus-Checksum-Algorithm: sha1` advertised in OPTIONS |
+| **expiration** | ✅ Implemented | `Upload-Expires` in POST / HEAD / PATCH responses; periodic server-side cleanup |
+| **concatenation** | ❌ Not implemented | Combining parallel partial uploads |
 
-## Version Handling
+## Protocol Requirements
 
-### How TUS Version Negotiation Works
+### Version Negotiation
 
-According to the official TUS specification:
+| Requirement | Status |
+|-------------|--------|
+| Client sends `Tus-Resumable` on all non-OPTIONS requests | ✅ |
+| Server returns `Tus-Resumable` on all responses | ✅ |
+| Server returns `412` on version mismatch | ✅ |
+| Server skips version check for OPTIONS | ✅ |
+| Server advertises supported versions in `Tus-Version` (OPTIONS) | ✅ |
 
-1. **Client Requirements:**
-   - Client MUST include `Tus-Resumable` header in ALL requests (except OPTIONS)
-   - The header value indicates the protocol version the client wants to use
-   - Example: `Tus-Resumable: 1.0.0`
+### Core Protocol — Server
 
-2. **Server Requirements:**
-   - Server MUST include `Tus-Resumable` header in ALL responses
-   - Server checks if it supports the version requested by client
-   - If supported: proceed with the request
-   - If NOT supported: return `412 Precondition Failed`
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| POST creates new upload, returns `201` + `Location` | ✅ | |
+| POST returns `400` on missing/invalid `Upload-Length` | ✅ | |
+| POST returns `400` on negative `Upload-Length` | ✅ | |
+| POST returns `413` when upload exceeds `Tus-Max-Size` | ✅ | |
+| HEAD returns `200` with `Upload-Offset` + `Upload-Length` | ✅ | |
+| HEAD includes `Cache-Control: no-store` | ✅ | |
+| HEAD returns `404` for unknown upload | ✅ | |
+| PATCH appends data, returns `204` + updated `Upload-Offset` | ✅ | |
+| PATCH returns `415` on wrong `Content-Type` | ✅ | Must be `application/offset+octet-stream` |
+| PATCH returns `409` on `Upload-Offset` mismatch | ✅ | |
+| PATCH returns `400` on negative `Upload-Offset` | ✅ | |
+| PATCH returns `400` if chunk would exceed `Upload-Length` | ✅ | |
+| PATCH returns `460` on checksum mismatch | ✅ | Non-standard but widely used |
+| PATCH returns `410` on expired upload | ✅ | |
+| OPTIONS returns `204` with server capabilities | ✅ | |
+| OPTIONS includes `Tus-Checksum-Algorithm` | ✅ | Reports `sha1` |
+| DELETE removes upload, returns `204` | ✅ | |
+| DELETE returns `404` for unknown upload | ✅ | |
+| Malformed `Content-Length` header → `400` | ✅ | |
 
-3. **Version Discovery (OPTIONS):**
-   - Server returns `Tus-Version` header listing all supported versions
-   - Example: `Tus-Version: 1.0.0,0.2.2,0.2.1`
+### Core Protocol — Client
 
-### Our Implementation
-
-**Server (`TusServer`):**
-- Supports only TUS version `1.0.0`
-- Checks `Tus-Resumable` header on all non-OPTIONS requests
-- Returns `412 Precondition Failed` if version is not exactly `1.0.0`
-- Returns `Tus-Version: 1.0.0` in OPTIONS response
-
-**Client (`TusClient`):**
-- Uses TUS version `1.0.0`
-- Sends `Tus-Resumable: 1.0.0` header with all requests
-- Compatible with any TUS 1.0.0 compliant server
-
-### Why Strict Version Checking?
-
-**This is correct behavior according to TUS specification!**
-
-The specification requires:
-- Servers check for EXACT version match
-- Servers are NOT required to support multiple versions
-- Servers MUST return 412 if version is not supported
-
-Our implementation:
-- ✅ Only supports version 1.0.0 (valid choice)
-- ✅ Checks for exact match (required)
-- ✅ Returns proper error code 412 (required)
-- ✅ Includes version in error response (required)
-
-### Working Together
-
-The client and server in this library work together because:
-1. Both use the same TUS version: `1.0.0`
-2. Client sends: `Tus-Resumable: 1.0.0`
-3. Server accepts: `1.0.0`
-4. Version match → Request proceeds
-
-### Using with Other TUS Implementations
-
-**Server Compatibility:**
-- Any TUS 1.0.0 compliant client can use our server
-- Clients using other versions (e.g., 0.2.2) will receive 412 error
-
-**Client Compatibility:**
-- Our client works with any TUS 1.0.0 compliant server
-- Servers supporting only other versions will reject our client
-
-## Supported Features
-
-### Core Protocol
-- ✅ Upload creation (POST)
-- ✅ Upload status check (HEAD)
-- ✅ Data upload (PATCH)
-- ✅ Offset tracking
-- ✅ Resumable uploads
-
-### Extensions
-- ✅ **creation**: Upload creation via POST
-- ✅ **termination**: Upload deletion via DELETE
-- ✅ **checksum**: SHA1 checksum verification (optional)
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| Sends `Tus-Resumable: 1.0.0` on all requests | ✅ | |
+| POST to create upload with `Upload-Length` | ✅ | |
+| HEAD to get current offset before resuming | ✅ | |
+| PATCH with `Upload-Offset` and correct `Content-Type` | ✅ | |
+| `Content-Length: 0` in DELETE request | ✅ | |
+| Configurable timeout on all `urlopen()` calls | ✅ | Default 30s |
+| Catches `URLError` (network-level) alongside `HTTPError` | ✅ | |
+| Exponential backoff with cap (max 60s) | ✅ | |
+| SHA1 checksum via `Upload-Checksum` header | ✅ | Optional |
+| Cross-session URL persistence (fingerprint-based) | ✅ | `FileURLStorage` |
+| Full-file fingerprint (not just first 64 KB) | ✅ | MD5 of entire content |
 
 ### Not Implemented
-- ❌ **concatenation**: Combining multiple uploads
-- ❌ **expiration**: Automatic upload expiry
-- ❌ Multiple protocol versions support
 
-## Protocol Headers
+| Feature | Notes |
+|---------|-------|
+| `concatenation` extension | Combining multiple partial uploads |
+| `X-HTTP-Method-Override` | For environments blocking PATCH/DELETE |
+| `Upload-Defer-Length` | Deferred length (part of creation extension) |
+| Multiple TUS version support | Only `1.0.0` supported |
 
-### Required Headers
+## Error Response Reference
 
-**Client → Server:**
-```
-Tus-Resumable: 1.0.0           (All requests except OPTIONS)
-Upload-Length: 1024             (POST - create upload)
-Upload-Offset: 0                (PATCH - append data)
-Content-Type: application/offset+octet-stream  (PATCH)
-```
-
-**Server → Client:**
-```
-Tus-Resumable: 1.0.0           (All responses)
-Tus-Version: 1.0.0             (OPTIONS response)
-Tus-Extension: creation,termination,checksum  (OPTIONS)
-Upload-Offset: 512             (HEAD, PATCH responses)
-Location: /files/{id}          (POST response)
-```
-
-### Optional Headers
-
-**Client → Server:**
-```
-Upload-Metadata: filename dGVzdC50eHQ=    (POST - base64 encoded)
-Upload-Checksum: sha1 {base64-hash}       (PATCH - verify data)
-```
-
-**Server → Client:**
-```
-Tus-Max-Size: 104857600        (OPTIONS - if size limit configured)
-Upload-Length: 1024             (HEAD - total file size)
-```
-
-## Error Responses
-
-| Status | Meaning | Reason |
-|--------|---------|--------|
-| 412 | Precondition Failed | Wrong TUS version |
-| 400 | Bad Request | Missing required header |
-| 404 | Not Found | Upload ID doesn't exist |
-| 409 | Conflict | Upload offset mismatch |
-| 413 | Payload Too Large | File exceeds max size |
-| 460 | Checksum Mismatch | Data integrity check failed |
+| Status | Meaning | Trigger |
+|--------|---------|---------|
+| `400` | Bad Request | Missing/invalid header, negative offset, chunk overflow |
+| `404` | Not Found | Unknown upload ID |
+| `409` | Conflict | `Upload-Offset` mismatch |
+| `410` | Gone | Upload has expired |
+| `412` | Precondition Failed | Unsupported TUS version |
+| `413` | Payload Too Large | Exceeds `Tus-Max-Size` |
+| `415` | Unsupported Media Type | Wrong `Content-Type` in PATCH |
+| `460` | Checksum Mismatch | SHA1 verification failed |
 
 ## References
 
-- **TUS Protocol Specification**: https://tus.io/protocols/resumable-upload.html
-- **TUS Core Protocol**: https://tus.io/protocols/resumable-upload.html#core-protocol
-- **Version Negotiation**: https://tus.io/protocols/resumable-upload.html#version-negotiation
-- **TUS Extensions**: https://tus.io/protocols/resumable-upload.html#protocol-extensions
-
-## FAQ
-
-**Q: Why does the server reject clients with different TUS versions?**
-A: This is required by the TUS specification. Servers must check for version compatibility and return 412 if the version is not supported.
-
-**Q: Can I use this client with other TUS servers?**
-A: Yes, as long as the server supports TUS protocol version 1.0.0.
-
-**Q: Can other clients use this server?**
-A: Yes, any TUS 1.0.0 compliant client will work with this server.
-
-**Q: Why not support multiple TUS versions?**
-A: Supporting multiple versions adds complexity. TUS 1.0.0 is the stable version and widely supported. Adding more versions is possible but not necessary for most use cases.
-
-**Q: Is the version check too strict?**
-A: No, this is exactly how TUS is designed to work. The specification explicitly requires exact version matching.
+- [TUS Protocol Specification v1.0.0](https://tus.io/protocols/resumable-upload.html)
+- [TUS Protocol Extensions](https://tus.io/protocols/resumable-upload.html#protocol-extensions)
