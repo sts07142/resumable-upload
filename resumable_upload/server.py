@@ -5,6 +5,7 @@ import binascii
 import hashlib
 import logging
 import re
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from email.utils import formatdate
@@ -15,9 +16,7 @@ from resumable_upload.storage import SQLiteStorage, Storage
 
 logger = logging.getLogger(__name__)
 
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 _TUS_EXPOSE_HEADERS = (
     "Upload-Offset,Location,Upload-Length,Tus-Version,Tus-Resumable,"
@@ -60,6 +59,7 @@ class TusServer:
     """
 
     TUS_VERSION = "1.0.0"
+    _MAX_METADATA_SIZE = 4096  # 4 KB limit to guard against DoS
     SUPPORTED_EXTENSIONS = [
         "creation",
         "termination",
@@ -75,6 +75,8 @@ class TusServer:
         max_size: int = 0,
         upload_expiry: Optional[int] = None,
         cors_allow_origins: Optional[str] = None,
+        cleanup_interval: int = 60,
+        request_timeout: int = 30,
     ):
         """Initialize TUS server.
 
@@ -84,12 +86,18 @@ class TusServer:
             max_size: Maximum upload size in bytes (0 = unlimited)
             upload_expiry: Upload expiry in seconds (None = no expiry)
             cors_allow_origins: CORS allowed origins (None = no CORS headers)
+            cleanup_interval: Minimum seconds between expired-upload cleanup runs (default: 60)
+            request_timeout: Socket read timeout in seconds for HTTP handler (default: 30)
         """
         self.storage = storage or SQLiteStorage()
         self.base_path = base_path.rstrip("/")
         self.max_size = max_size
         self.upload_expiry = upload_expiry
         self.cors_allow_origins = cors_allow_origins
+        self.cleanup_interval = cleanup_interval
+        self.request_timeout = request_timeout
+        self._last_cleanup: Optional[datetime] = None
+        self._cleanup_lock = threading.Lock()
 
     def _validate_upload_id(self, upload_id: str) -> bool:
         """Validate that upload_id is a valid UUID to prevent path traversal."""
@@ -171,6 +179,26 @@ class TusServer:
             result = self._error_response(404, "Not Found")
 
         status, resp_headers, resp_body = result
+
+        # Periodically clean up expired uploads after the current request is handled,
+        # so the current request still gets 410 for an expired upload before it's deleted
+        if self.upload_expiry is not None:
+            now = datetime.now(timezone.utc)
+            if (
+                self._last_cleanup is None
+                or (now - self._last_cleanup).total_seconds() >= self.cleanup_interval
+            ):
+                with self._cleanup_lock:
+                    # Re-check after acquiring lock (double-check pattern)
+                    if (
+                        self._last_cleanup is None
+                        or (now - self._last_cleanup).total_seconds() >= self.cleanup_interval
+                    ):
+                        self._last_cleanup = now
+                        count = self.storage.cleanup_expired_uploads()
+                        if count:
+                            logger.info(f"Cleaned up {count} expired upload(s)")
+
         return (status, self._add_cors_headers(resp_headers), resp_body)
 
     def _handle_options(
@@ -182,6 +210,7 @@ class TusServer:
             "Tus-Resumable": self.TUS_VERSION,
             "Tus-Version": self.TUS_VERSION,
             "Tus-Extension": ",".join(self.SUPPORTED_EXTENSIONS),
+            "Tus-Checksum-Algorithm": "sha1",
         }
 
         if self.max_size > 0:
@@ -204,6 +233,10 @@ class TusServer:
             logger.error(f"Invalid Upload-Length header: {upload_length_str}")
             return self._error_response(400, "Invalid Upload-Length header")
 
+        if upload_length < 0:
+            logger.error(f"Negative Upload-Length header: {upload_length}")
+            return self._error_response(400, "Upload-Length must not be negative")
+
         if self.max_size > 0 and upload_length > self.max_size:
             logger.warning(f"Upload size {upload_length} exceeds maximum {self.max_size}")
             return self._error_response(413, "Upload exceeds maximum size")
@@ -212,14 +245,20 @@ class TusServer:
         metadata = {}
         upload_metadata = headers.get("upload-metadata", "")
         if upload_metadata:
+            if len(upload_metadata) > self._MAX_METADATA_SIZE:
+                return self._error_response(
+                    400, f"Upload-Metadata exceeds maximum size of {self._MAX_METADATA_SIZE} bytes"
+                )
             for pair in upload_metadata.split(","):
                 pair = pair.strip()
                 if " " in pair:
                     key, value = pair.split(" ", 1)
                     try:
                         metadata[key] = base64.b64decode(value).decode("utf-8")
-                    except (ValueError, UnicodeDecodeError):
-                        metadata[key] = value
+                    except (ValueError, UnicodeDecodeError, binascii.Error) as e:
+                        return self._error_response(
+                            400, f"Invalid base64 encoding for metadata key '{key}': {e}"
+                        )
 
         # Generate upload ID
         upload_id = str(uuid.uuid4())
@@ -236,6 +275,14 @@ class TusServer:
         # Handle creation-with-upload: process initial data if provided
         initial_offset = 0
         content_type = headers.get("content-type", "")
+        if body and content_type != "application/offset+octet-stream":
+            # Body present but Content-Type doesn't match — body is silently ignored per TUS spec.
+            # Log a warning so developers can catch misconfigurations.
+            logger.warning(
+                "POST body received with Content-Type '%s' instead of "
+                "application/offset+octet-stream; body ignored (not creation-with-upload)",
+                content_type,
+            )
         if body and content_type == "application/offset+octet-stream":
             self.storage.write_chunk(upload_id, 0, body)
             initial_offset = len(body)
@@ -319,7 +366,7 @@ class TusServer:
         content_type = headers.get("content-type", "")
         if content_type != "application/offset+octet-stream":
             logger.error(f"Invalid Content-Type: {content_type}")
-            return self._error_response(400, "Invalid Content-Type")
+            return self._error_response(415, "Invalid Content-Type")
 
         # Check upload offset
         upload_offset_str = headers.get("upload-offset")
@@ -332,6 +379,10 @@ class TusServer:
         except ValueError:
             logger.error(f"Invalid Upload-Offset header: {upload_offset_str}")
             return self._error_response(400, "Invalid Upload-Offset header")
+
+        if upload_offset < 0:
+            logger.error(f"Negative Upload-Offset: {upload_offset}")
+            return self._error_response(400, "Upload-Offset must not be negative")
 
         if upload_offset != upload["offset"]:
             logger.error(
@@ -354,9 +405,14 @@ class TusServer:
                 logger.error(f"Invalid Upload-Checksum header: {e}")
                 return self._error_response(400, "Invalid Upload-Checksum header")
 
+        # Reject chunk if it would exceed the declared upload length
+        new_offset = upload_offset + len(body)
+        if new_offset > upload["upload_length"]:
+            logger.error(f"Chunk exceeds upload length: {new_offset} > {upload['upload_length']}")
+            return self._error_response(400, "Chunk would exceed declared upload length")
+
         # Write chunk
         self.storage.write_chunk(upload_id, upload_offset, body)
-        new_offset = upload_offset + len(body)
         self.storage.update_offset(upload_id, new_offset)
 
         logger.info(
@@ -369,6 +425,9 @@ class TusServer:
             "Tus-Resumable": self.TUS_VERSION,
             "Upload-Offset": str(new_offset),
         }
+
+        if expires_at:
+            response_headers["Upload-Expires"] = self._format_expiry(expires_at)
 
         return (204, response_headers, b"")
 
@@ -416,12 +475,38 @@ class TusHTTPRequestHandler(BaseHTTPRequestHandler):
         """Handle DELETE request."""
         self._handle_request("DELETE")
 
+    def setup(self) -> None:
+        """Set socket read timeout from server config to guard against Slowloris."""
+        super().setup()
+        if self.tus_server and self.tus_server.request_timeout > 0:
+            self.connection.settimeout(self.tus_server.request_timeout)
+
     def _handle_request(self, method: str) -> None:
         """Handle incoming request."""
         # Read body for POST/PATCH
         body = b""
         if method in ("POST", "PATCH"):
-            content_length = int(self.headers.get("Content-Length", 0))
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+            except (ValueError, TypeError):
+                self.send_response(400)
+                self.send_header("Tus-Resumable", self.tus_server.TUS_VERSION)
+                self.end_headers()
+                self.wfile.write(b"Invalid Content-Length header")
+                return
+            if content_length < 0:
+                self.send_response(400)
+                self.send_header("Tus-Resumable", self.tus_server.TUS_VERSION)
+                self.end_headers()
+                self.wfile.write(b"Content-Length must not be negative")
+                return
+            max_size = self.tus_server.max_size
+            if max_size > 0 and content_length > max_size:
+                self.send_response(413)
+                self.send_header("Tus-Resumable", self.tus_server.TUS_VERSION)
+                self.end_headers()
+                self.wfile.write(b"Request entity too large")
+                return
             if content_length > 0:
                 body = self.rfile.read(content_length)
 

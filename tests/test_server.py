@@ -155,7 +155,7 @@ class TestTusServer:
             "PATCH", f"/files/{upload_id}", headers, b"data"
         )
 
-        assert status == 400
+        assert status == 415
 
     def test_handle_delete(self, server, storage):
         """Test DELETE request to terminate upload."""
@@ -426,3 +426,63 @@ class TestTusServer:
         )
         assert status == 400
         assert resp_headers.get("Access-Control-Allow-Origin") == "https://example.com"
+
+    # --- Review fixes: server validation ---
+
+    def test_patch_exceeding_upload_length_returns_400(self, server):
+        """PATCH that would exceed declared upload length is rejected with 400."""
+        upload_id = str(uuid.uuid4())
+        server.storage.create_upload(upload_id, 100, {})
+
+        headers = {
+            "tus-resumable": "1.0.0",
+            "upload-offset": "0",
+            "content-type": "application/offset+octet-stream",
+        }
+        # Send 200 bytes when upload_length is 100
+        status, _, _ = server.handle_request(
+            "PATCH", f"/files/{upload_id}", headers, b"x" * 200
+        )
+        assert status == 400
+
+    def test_patch_negative_offset_returns_400(self, server):
+        """PATCH with negative Upload-Offset is rejected with 400."""
+        upload_id = str(uuid.uuid4())
+        server.storage.create_upload(upload_id, 100, {})
+
+        headers = {
+            "tus-resumable": "1.0.0",
+            "upload-offset": "-1",
+            "content-type": "application/offset+octet-stream",
+        }
+        status, _, _ = server.handle_request(
+            "PATCH", f"/files/{upload_id}", headers, b"data"
+        )
+        assert status == 400
+
+    def test_expired_uploads_cleaned_up_after_request(self, storage):
+        """Expired uploads are removed after cleanup_interval has elapsed."""
+        server = TusServer(storage=storage, upload_expiry=1, cleanup_interval=0)
+
+        upload_id = str(uuid.uuid4())
+        past = datetime.now(timezone.utc) - timedelta(seconds=2)
+        storage.create_upload(upload_id, 100, {}, expires_at=past)
+
+        # Any request triggers cleanup after processing
+        server.handle_request("OPTIONS", "/files", {})
+
+        # Expired upload should now be gone
+        assert storage.get_upload(upload_id) is None
+
+    def test_creation_with_upload_wrong_content_type_body_ignored(self, server):
+        """POST with body but wrong Content-Type: body is ignored, upload created at offset 0."""
+        headers = {
+            "tus-resumable": "1.0.0",
+            "upload-length": "50",
+            "content-type": "application/json",  # Wrong type — body ignored per TUS spec
+        }
+        status, resp_headers, _ = server.handle_request(
+            "POST", "/files", headers, b"x" * 10
+        )
+        assert status == 201
+        assert resp_headers.get("Upload-Offset") == "0"  # Body was not processed
