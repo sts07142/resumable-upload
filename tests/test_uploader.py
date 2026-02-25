@@ -377,6 +377,17 @@ class TestUploader:
 
         uploader.close()
 
+    # --- Phase 4: timeout parameter ---
+
+    def test_uploader_has_default_timeout(self, test_file, server):
+        """Uploader has a default timeout of 30 seconds."""
+        url, storage = server
+        client = TusClient(url)
+        upload_url = client.upload_file(test_file)
+        uploader = Uploader(url=upload_url, file_path=test_file)
+        assert uploader.timeout == 30.0
+        uploader.close()
+
     # --- Phase 1.5: ssl_context passed to Uploader ---
 
     def test_ssl_context_passed_to_urlopen(self, test_file, server):
@@ -392,5 +403,30 @@ class TestUploader:
         # create_uploader should propagate ssl_context to the Uploader
         uploader = client.create_uploader(test_file)
         assert uploader.ssl_context is client.ssl_context
+
+        uploader.close()
+
+    def test_upload_chunk_raises_on_truncated_file(self, test_file, server):
+        """upload_chunk() raises OSError if file is shorter than expected."""
+        import unittest.mock
+
+        url, storage = server
+
+        from urllib.parse import urljoin
+        from urllib.request import Request, urlopen
+
+        file_size = os.path.getsize(test_file)
+        headers = {"Tus-Resumable": "1.0.0", "Upload-Length": str(file_size)}
+        req = Request(url, headers=headers, method="POST")
+        with urlopen(req) as response:
+            location = response.headers.get("Location")
+            upload_url = urljoin(url, location) if not location.startswith("http") else location
+
+        uploader = Uploader(url=upload_url, file_path=test_file, chunk_size=1024)
+
+        # Simulate a file that returns empty bytes unexpectedly
+        with unittest.mock.patch.object(uploader._file_handle, "read", return_value=b""):
+            with pytest.raises(OSError, match="Unexpected end of file"):
+                uploader.upload_chunk()
 
         uploader.close()

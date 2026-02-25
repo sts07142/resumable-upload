@@ -460,3 +460,19 @@ class TestTusClient:
         url, storage = server
         client = TusClient(url)
         assert client.ssl_context is None
+
+    # --- Phase 4: timeout parameter ---
+
+    def test_client_has_default_timeout(self, server):
+        """TusClient has a default timeout of 30 seconds."""
+        url, storage = server
+        client = TusClient(url)
+        assert client.timeout == 30.0
+
+    def test_client_custom_timeout_passed_to_uploader(self, test_file, server):
+        """Custom timeout on TusClient is passed through to Uploader."""
+        url, storage = server
+        client = TusClient(url, timeout=10.0)
+        uploader = client.create_uploader(test_file)
+        assert uploader.timeout == 10.0
+        uploader.close()

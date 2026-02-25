@@ -61,6 +61,7 @@ class TusClient:
         headers: Optional[dict[str, str]] = None,
         max_retries: int = 3,
         retry_delay: float = 1.0,
+        timeout: float = 30.0,
     ):
         """Initialize TUS client.
 
@@ -76,6 +77,7 @@ class TusClient:
             headers: Optional custom headers to include in all requests
             max_retries: Maximum retry attempts for failed chunks (default: 3)
             retry_delay: Base delay between retry attempts in seconds (default: 1.0)
+            timeout: Request timeout in seconds (default: 30.0)
 
         Raises:
             ValueError: If chunk_size is less than 1
@@ -96,6 +98,7 @@ class TusClient:
         self.headers = headers or {}
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.timeout = timeout
         self.ssl_context = self._build_ssl_context()
 
     def _build_ssl_context(self) -> Optional[ssl.SSLContext]:
@@ -154,9 +157,7 @@ class TusClient:
 
         # Calculate fingerprint once (avoid double computation)
         fingerprint = (
-            self.fingerprinter.get_fingerprint(file_path or file_stream)
-            if self.store_url
-            else None
+            self.fingerprinter.get_fingerprint(file_path or file_stream) if self.store_url else None
         )
 
         # Check for stored URL if enabled
@@ -181,6 +182,7 @@ class TusClient:
             max_retries=self.max_retries,
             retry_delay=self.retry_delay,
             ssl_context=self.ssl_context,
+            timeout=self.timeout,
         )
 
         try:
@@ -227,6 +229,7 @@ class TusClient:
             max_retries=self.max_retries,
             retry_delay=self.retry_delay,
             ssl_context=self.ssl_context,
+            timeout=self.timeout,
         )
 
         try:
@@ -252,7 +255,7 @@ class TusClient:
 
         req = Request(upload_url, headers=headers, method="DELETE")
         try:
-            with urlopen(req, context=self.ssl_context):
+            with urlopen(req, context=self.ssl_context, timeout=self.timeout):
                 pass
         except (HTTPError, URLError) as e:
             if isinstance(e, HTTPError) and e.code == 404:
@@ -288,7 +291,7 @@ class TusClient:
 
         try:
             req = Request(self.url, data=body or None, headers=headers, method="POST")
-            with urlopen(req, context=self.ssl_context) as response:
+            with urlopen(req, context=self.ssl_context, timeout=self.timeout) as response:
                 location = response.headers.get("Location")
                 if not location:
                     raise TusCommunicationError("Server did not return Location header")
@@ -426,7 +429,7 @@ class TusClient:
 
         try:
             req = Request(upload_url, headers=headers, method="HEAD")
-            with urlopen(req, context=self.ssl_context) as response:
+            with urlopen(req, context=self.ssl_context, timeout=self.timeout) as response:
                 upload_metadata = response.headers.get("Upload-Metadata")
                 if not upload_metadata:
                     return {}
@@ -480,7 +483,7 @@ class TusClient:
 
         try:
             req = Request(upload_url, headers=headers, method="HEAD")
-            with urlopen(req, context=self.ssl_context) as response:
+            with urlopen(req, context=self.ssl_context, timeout=self.timeout) as response:
                 offset_str = response.headers.get("Upload-Offset")
                 length_str = response.headers.get("Upload-Length")
 
@@ -536,7 +539,7 @@ class TusClient:
         """
         try:
             req = Request(self.url, method="OPTIONS")
-            with urlopen(req, context=self.ssl_context) as response:
+            with urlopen(req, context=self.ssl_context, timeout=self.timeout) as response:
                 tus_version = response.headers.get("Tus-Version", self.TUS_VERSION)
                 tus_extension = response.headers.get("Tus-Extension", "")
                 tus_max_size = response.headers.get("Tus-Max-Size")
@@ -621,4 +624,5 @@ class TusClient:
             max_retries=self.max_retries,
             retry_delay=self.retry_delay,
             ssl_context=self.ssl_context,
+            timeout=self.timeout,
         )

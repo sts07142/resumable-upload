@@ -4,7 +4,7 @@ import base64
 import hashlib
 import os
 import ssl
-import time
+import threading
 from threading import Lock
 from typing import IO, Callable, Optional, Union
 from urllib.error import HTTPError, URLError
@@ -52,6 +52,8 @@ class Uploader:
         max_retries: int = 0,
         retry_delay: float = 1.0,
         ssl_context: Optional[ssl.SSLContext] = None,
+        timeout: float = 30.0,
+        stop_event: Optional[threading.Event] = None,
     ):
         """Initialize TUS uploader.
 
@@ -66,6 +68,8 @@ class Uploader:
             max_retries: Maximum retry attempts for failed chunks (default: 0, disabled)
             retry_delay: Base delay between retry attempts in seconds (default: 1.0)
             ssl_context: Optional SSL context for TLS connections
+            timeout: Request timeout in seconds (default: 30.0)
+            stop_event: Optional threading.Event; when set, retry waits are interrupted
 
         Raises:
             ValueError: If neither file_path nor file_stream provided, or chunk_size < 1
@@ -89,6 +93,8 @@ class Uploader:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.ssl_context = ssl_context
+        self.timeout = timeout
+        self._stop_event = stop_event or threading.Event()
 
         # Initialize file stream and get file size
         if file_stream:
@@ -106,8 +112,13 @@ class Uploader:
         self._stats = UploadStats(total_bytes=self.file_size)
         self.stats_lock = Lock()
 
-        # Get current offset from server
-        self.offset = self._get_offset()
+        # Get current offset from server; close file handle on failure
+        try:
+            self.offset = self._get_offset()
+        except Exception:
+            if self._owns_file:
+                self._file_handle.close()
+            raise
         self._file_handle.seek(self.offset)
 
         # Initialize stats with current offset (for already started uploads)
@@ -135,7 +146,7 @@ class Uploader:
 
         try:
             req = Request(self.url, headers=headers, method="HEAD")
-            with urlopen(req, context=self.ssl_context) as response:
+            with urlopen(req, context=self.ssl_context, timeout=self.timeout) as response:
                 offset = response.headers.get("Upload-Offset")
                 if offset is None:
                     raise TusCommunicationError("Server did not return Upload-Offset header")
@@ -176,7 +187,7 @@ class Uploader:
 
         try:
             req = Request(self.url, data=data, headers=headers, method="PATCH")
-            with urlopen(req, context=self.ssl_context) as response:
+            with urlopen(req, context=self.ssl_context, timeout=self.timeout) as response:
                 # Update offset from server response
                 new_offset = response.headers.get("Upload-Offset")
                 if new_offset:
@@ -220,9 +231,10 @@ class Uploader:
             except (TusUploadFailed, OSError) as e:
                 last_error = e
                 if attempt < self.max_retries:
-                    # Exponential backoff
-                    delay = self.retry_delay * (2**attempt)
-                    time.sleep(delay)
+                    # Exponential backoff capped at 60 seconds; interruptible via stop_event
+                    delay = min(self.retry_delay * (2**attempt), 60.0)
+                    if self._stop_event.wait(timeout=delay):
+                        raise TusUploadFailed("Upload cancelled via stop_event") from e
                 else:
                     # All retries failed
                     with self.stats_lock:
@@ -254,7 +266,10 @@ class Uploader:
         chunk = self._file_handle.read(chunk_size)
 
         if not chunk:
-            return False
+            raise OSError(
+                f"Unexpected end of file at offset {self.offset} "
+                f"(file size reported as {self.file_size} bytes)"
+            )
 
         # Upload chunk (stats are automatically updated inside _upload_chunk)
         self._upload_chunk(chunk)
@@ -286,7 +301,10 @@ class Uploader:
             chunk = self._file_handle.read(chunk_size)
 
             if not chunk:
-                break
+                raise OSError(
+                    f"Unexpected end of file at offset {self.offset} "
+                    f"(file size reported as {self.file_size} bytes)"
+                )
 
             # Upload chunk (stats are automatically updated inside _upload_chunk)
             self._upload_chunk(chunk)
