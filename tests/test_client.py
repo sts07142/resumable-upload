@@ -428,6 +428,24 @@ class TestTusClient:
 
     # --- Phase 1.5: verify_tls_cert builds ssl_context ---
 
+    # --- Phase 3: URLError handling ---
+
+    def test_create_upload_network_error_raises_communication_error(self, server, test_file):
+        """URLError during _create_upload raises TusCommunicationError."""
+        from unittest.mock import patch
+        from urllib.error import URLError
+
+        from resumable_upload.exceptions import TusCommunicationError
+
+        url, storage = server
+        client = TusClient(url)
+
+        with patch("resumable_upload.client.base.urlopen", side_effect=URLError("network error")):
+            with pytest.raises(TusCommunicationError):
+                client.upload_file(test_file)
+
+    # --- Phase 1.5: verify_tls_cert builds ssl_context ---
+
     def test_verify_tls_cert_false_builds_ssl_context(self, server):
         """verify_tls_cert=False creates an ssl_context with cert checking disabled."""
         url, storage = server

@@ -5,7 +5,7 @@ import os
 import re
 import ssl
 from typing import IO, Any, Callable, Optional, Union
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
@@ -246,6 +246,7 @@ class TusClient:
         """
         headers = {
             "Tus-Resumable": self.TUS_VERSION,
+            "Content-Length": "0",
             **self.headers,
         }
 
@@ -253,9 +254,12 @@ class TusClient:
         try:
             with urlopen(req, context=self.ssl_context):
                 pass
-        except HTTPError as e:
-            if e.code != 404:
-                raise
+        except (HTTPError, URLError) as e:
+            if isinstance(e, HTTPError) and e.code == 404:
+                return  # Upload already deleted
+            raise TusCommunicationError(
+                f"Failed to delete upload: {str(e)}",
+            ) from e
 
     def _create_upload(
         self,
@@ -294,7 +298,7 @@ class TusClient:
                     location = urljoin(self.url, location)
 
                 return location
-        except HTTPError as e:
+        except (HTTPError, URLError) as e:
             raise TusCommunicationError(
                 f"Failed to create upload: {str(e)}",
             ) from e
@@ -442,7 +446,7 @@ class TusClient:
                             metadata[key] = value
 
                 return metadata
-        except HTTPError as e:
+        except (HTTPError, URLError) as e:
             raise TusCommunicationError(
                 f"Failed to get metadata: {str(e)}",
             ) from e
@@ -506,7 +510,7 @@ class TusClient:
                     "complete": complete,
                     "metadata": metadata,
                 }
-        except HTTPError as e:
+        except (HTTPError, URLError) as e:
             raise TusCommunicationError(
                 f"Failed to get upload info: {str(e)}",
             ) from e
@@ -550,7 +554,7 @@ class TusClient:
                     "extensions": extensions,
                     "max_size": max_size,
                 }
-        except HTTPError as e:
+        except (HTTPError, URLError) as e:
             raise TusCommunicationError(
                 f"Failed to get server info: {str(e)}",
             ) from e

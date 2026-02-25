@@ -140,7 +140,7 @@ class Uploader:
                 if offset is None:
                     raise TusCommunicationError("Server did not return Upload-Offset header")
                 return int(offset)
-        except HTTPError as e:
+        except (HTTPError, URLError) as e:
             raise TusCommunicationError(
                 f"Failed to get offset: {str(e)}",
             ) from e
@@ -183,7 +183,7 @@ class Uploader:
                     self.offset = int(new_offset)
                 else:
                     self.offset += len(data)
-        except HTTPError as e:
+        except (HTTPError, URLError) as e:
             raise TusUploadFailed(
                 f"Failed to upload chunk at offset {self.offset}: {str(e)}",
             ) from e
@@ -217,7 +217,7 @@ class Uploader:
                 # Update stats after successful upload
                 self._update_stats_after_chunk()
                 return  # Success
-            except (HTTPError, URLError, OSError) as e:
+            except (TusUploadFailed, OSError) as e:
                 last_error = e
                 if attempt < self.max_retries:
                     # Exponential backoff

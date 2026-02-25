@@ -356,6 +356,27 @@ class TestUploader:
         with pytest.raises(ValueError, match="chunk_size must be at least 1"):
             Uploader(url=upload_url, file_path=test_file, chunk_size=-1)
 
+    # --- Phase 3: URLError handling ---
+
+    def test_get_offset_network_error_raises_communication_error(self, test_file, server):
+        """URLError during _get_offset raises TusCommunicationError."""
+        from unittest.mock import patch
+        from urllib.error import URLError
+
+        from resumable_upload.exceptions import TusCommunicationError
+
+        url, storage = server
+        client = TusClient(url)
+        upload_url = client.upload_file(test_file)
+
+        uploader = Uploader(url=upload_url, file_path=test_file)
+
+        with patch("resumable_upload.client.uploader.urlopen", side_effect=URLError("network error")):
+            with pytest.raises(TusCommunicationError):
+                uploader._get_offset()
+
+        uploader.close()
+
     # --- Phase 1.5: ssl_context passed to Uploader ---
 
     def test_ssl_context_passed_to_urlopen(self, test_file, server):
