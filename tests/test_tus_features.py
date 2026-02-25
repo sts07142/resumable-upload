@@ -3,6 +3,8 @@
 import os
 import tempfile
 
+import pytest
+
 from resumable_upload.exceptions import TusCommunicationError, TusUploadFailed
 from resumable_upload.fingerprint import Fingerprint
 from resumable_upload.url_storage import FileURLStorage
@@ -225,5 +227,93 @@ class TestURLStorage:
             assert storage.get_url("fp1") == "url1"
             assert storage.get_url("fp2") == "url2"
             assert storage.get_url("fp3") == "url3"
+        finally:
+            os.unlink(storage_path)
+
+    def test_file_url_storage_concurrent_set_no_data_loss(self):
+        """Concurrent set_url calls do not lose entries."""
+        import threading
+
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
+            storage_path = f.name
+
+        try:
+            storage = FileURLStorage(storage_path)
+            n = 50
+            errors = []
+
+            def worker(i):
+                try:
+                    storage.set_url(f"fp{i}", f"url{i}")
+                except Exception as e:
+                    errors.append(e)
+
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            assert not errors
+            # Every fingerprint must be present
+            for i in range(n):
+                assert storage.get_url(f"fp{i}") == f"url{i}", f"fp{i} missing"
+        finally:
+            os.unlink(storage_path)
+
+    def test_save_data_atomic_no_corruption_on_crash(self):
+        """Simulate crash mid-write: existing data must survive."""
+        import unittest.mock
+
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
+            storage_path = f.name
+
+        try:
+            storage = FileURLStorage(storage_path)
+            storage.set_url("fp_existing", "url_existing")
+
+            # Simulate crash: make os.replace raise so the file is never overwritten
+            with unittest.mock.patch("os.replace", side_effect=OSError("disk full")):
+                with pytest.raises(OSError):
+                    storage.set_url("fp_new", "url_new")
+
+            # Original data must still be intact
+            assert storage.get_url("fp_existing") == "url_existing"
+        finally:
+            os.unlink(storage_path)
+
+    def test_get_url_consistent_during_concurrent_write(self):
+        """get_url never returns corrupt data while set_url is writing."""
+        import threading
+
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
+            storage_path = f.name
+
+        try:
+            storage = FileURLStorage(storage_path)
+            storage.set_url("stable", "stable_url")
+            errors = []
+
+            def writer():
+                for i in range(20):
+                    try:
+                        storage.set_url(f"key{i}", f"val{i}")
+                    except Exception as e:
+                        errors.append(e)
+
+            def reader():
+                for _ in range(40):
+                    try:
+                        result = storage.get_url("stable")
+                        # Once written, stable url must always be found or None (not corrupt)
+                        assert result in ("stable_url", None)
+                    except Exception as e:
+                        errors.append(e)
+
+            t1 = threading.Thread(target=writer)
+            t2 = threading.Thread(target=reader)
+            t1.start(); t2.start()
+            t1.join(); t2.join()
+            assert not errors
         finally:
             os.unlink(storage_path)
