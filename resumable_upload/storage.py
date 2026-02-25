@@ -1,5 +1,6 @@
 """Storage backend for managing upload state."""
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -81,25 +82,25 @@ class SQLiteStorage(Storage):
     def _init_db(self) -> None:
         """Initialize database schema."""
         conn = sqlite3.connect(self.db_path)
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS uploads (
-                upload_id TEXT PRIMARY KEY,
-                upload_length INTEGER NOT NULL,
-                offset INTEGER DEFAULT 0,
-                metadata TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                completed BOOLEAN DEFAULT 0
-            )
-            """
-        )
-        # Migration: add expires_at column for existing databases
         try:
-            conn.execute("ALTER TABLE uploads ADD COLUMN expires_at TIMESTAMP")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        conn.commit()
-        conn.close()
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS uploads (
+                    upload_id TEXT PRIMARY KEY,
+                    upload_length INTEGER NOT NULL,
+                    offset INTEGER DEFAULT 0,
+                    metadata TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed BOOLEAN DEFAULT 0
+                )
+                """
+            )
+            # Migration: add expires_at column for existing databases
+            with contextlib.suppress(sqlite3.OperationalError):
+                conn.execute("ALTER TABLE uploads ADD COLUMN expires_at TIMESTAMP")
+            conn.commit()
+        finally:
+            conn.close()
 
     def create_upload(
         self,
@@ -110,29 +111,37 @@ class SQLiteStorage(Storage):
     ) -> None:
         """Create a new upload entry."""
         conn = sqlite3.connect(self.db_path)
-        expires_at_str = expires_at.astimezone(timezone.utc).isoformat() if expires_at else None
-        conn.execute(
-            """
-            INSERT INTO uploads (upload_id, upload_length, metadata, expires_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (upload_id, upload_length, json.dumps(metadata), expires_at_str),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            expires_at_str = expires_at.astimezone(timezone.utc).isoformat() if expires_at else None
+            conn.execute(
+                """
+                INSERT INTO uploads (upload_id, upload_length, metadata, expires_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (upload_id, upload_length, json.dumps(metadata), expires_at_str),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
-        # Create empty file
+        # Create empty file; roll back DB record if file creation fails
         file_path = self.get_file_path(upload_id)
-        with open(file_path, "wb"):
-            pass
+        try:
+            with open(file_path, "wb"):
+                pass
+        except OSError:
+            self.delete_upload(upload_id)
+            raise
 
     def get_upload(self, upload_id: str) -> Optional[dict[str, Any]]:
         """Get upload information."""
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.execute("SELECT * FROM uploads WHERE upload_id = ?", (upload_id,))
-        row = cursor.fetchone()
-        conn.close()
+        try:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM uploads WHERE upload_id = ?", (upload_id,))
+            row = cursor.fetchone()
+        finally:
+            conn.close()
 
         if row is None:
             return None
@@ -160,29 +169,35 @@ class SQLiteStorage(Storage):
     def update_offset(self, upload_id: str, offset: int) -> None:
         """Update the current offset of an upload."""
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.execute("SELECT upload_length FROM uploads WHERE upload_id = ?", (upload_id,))
-        row = cursor.fetchone()
-
-        if row:
-            upload_length = row[0]
-            completed = offset >= upload_length
-            conn.execute(
-                """
-                UPDATE uploads
-                SET offset = ?, completed = ?
-                WHERE upload_id = ?
-                """,
-                (offset, completed, upload_id),
+        try:
+            cursor = conn.execute(
+                "SELECT upload_length FROM uploads WHERE upload_id = ?", (upload_id,)
             )
-            conn.commit()
-        conn.close()
+            row = cursor.fetchone()
+
+            if row:
+                upload_length = row[0]
+                completed = offset >= upload_length
+                conn.execute(
+                    """
+                    UPDATE uploads
+                    SET offset = ?, completed = ?
+                    WHERE upload_id = ?
+                    """,
+                    (offset, completed, upload_id),
+                )
+                conn.commit()
+        finally:
+            conn.close()
 
     def delete_upload(self, upload_id: str) -> None:
         """Delete an upload entry."""
         conn = sqlite3.connect(self.db_path)
-        conn.execute("DELETE FROM uploads WHERE upload_id = ?", (upload_id,))
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute("DELETE FROM uploads WHERE upload_id = ?", (upload_id,))
+            conn.commit()
+        finally:
+            conn.close()
 
         # Delete file if exists
         file_path = self.get_file_path(upload_id)
@@ -213,13 +228,15 @@ class SQLiteStorage(Storage):
     def get_expired_uploads(self) -> list[str]:
         """Get list of expired upload IDs."""
         conn = sqlite3.connect(self.db_path)
-        now = datetime.now(timezone.utc).isoformat()
-        cursor = conn.execute(
-            "SELECT upload_id FROM uploads WHERE expires_at IS NOT NULL AND expires_at < ?",
-            (now,),
-        )
-        rows = cursor.fetchall()
-        conn.close()
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            cursor = conn.execute(
+                "SELECT upload_id FROM uploads WHERE expires_at IS NOT NULL AND expires_at < ?",
+                (now,),
+            )
+            rows = cursor.fetchall()
+        finally:
+            conn.close()
         return [row[0] for row in rows]
 
     def cleanup_expired_uploads(self) -> int:
