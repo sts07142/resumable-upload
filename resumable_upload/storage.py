@@ -170,23 +170,12 @@ class SQLiteStorage(Storage):
         """Update the current offset of an upload."""
         conn = sqlite3.connect(self.db_path)
         try:
-            cursor = conn.execute(
-                "SELECT upload_length FROM uploads WHERE upload_id = ?", (upload_id,)
+            conn.execute(
+                "UPDATE uploads SET offset = ?, completed = (? >= upload_length)"
+                " WHERE upload_id = ?",
+                (offset, offset, upload_id),
             )
-            row = cursor.fetchone()
-
-            if row:
-                upload_length = row[0]
-                completed = offset >= upload_length
-                conn.execute(
-                    """
-                    UPDATE uploads
-                    SET offset = ?, completed = ?
-                    WHERE upload_id = ?
-                    """,
-                    (offset, completed, upload_id),
-                )
-                conn.commit()
+            conn.commit()
         finally:
             conn.close()
 
