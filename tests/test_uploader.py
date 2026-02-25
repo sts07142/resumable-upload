@@ -495,6 +495,26 @@ class TestUploader:
         assert uploader.stats.chunks_retried == 1
         uploader.close()
 
+    def test_upload_with_stop_at_larger_than_file_size(self, test_file, server):
+        """upload(stop_at=N) where N > file_size clamps to file_size and completes normally."""
+        from urllib.parse import urljoin
+        from urllib.request import Request, urlopen
+
+        url, _ = server
+
+        file_size = os.path.getsize(test_file)
+        headers = {"Tus-Resumable": "1.0.0", "Upload-Length": str(file_size)}
+        req = Request(url, headers=headers, method="POST")
+        with urlopen(req) as response:
+            location = response.headers.get("Location")
+            upload_url = urljoin(url, location) if not location.startswith("http") else location
+
+        uploader = Uploader(url=upload_url, file_path=test_file, chunk_size=1024)
+        # stop_at larger than actual file — should complete without OSError
+        uploader.upload(stop_at=file_size * 10)
+        assert uploader.is_complete is True
+        uploader.close()
+
     def test_upload_with_stop_at_less_than_current_offset_is_noop(self, test_file, server):
         """upload(stop_at=N) where N <= current offset does nothing."""
         url, _ = server

@@ -293,7 +293,7 @@ class Uploader:
         Raises:
             TusUploadFailed: If upload fails
         """
-        max_offset = stop_at if stop_at is not None else self.file_size
+        max_offset = min(stop_at, self.file_size) if stop_at is not None else self.file_size
 
         while self.offset < max_offset:
             chunk_size = min(self.chunk_size, max_offset - self.offset)
