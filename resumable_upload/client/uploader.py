@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import os
+import ssl
 import time
 from threading import Lock
 from typing import IO, Callable, Optional, Union
@@ -50,6 +51,7 @@ class Uploader:
         headers: Optional[dict[str, str]] = None,
         max_retries: int = 0,
         retry_delay: float = 1.0,
+        ssl_context: Optional[ssl.SSLContext] = None,
     ):
         """Initialize TUS uploader.
 
@@ -63,6 +65,7 @@ class Uploader:
             headers: Optional custom headers to include in all requests
             max_retries: Maximum retry attempts for failed chunks (default: 0, disabled)
             retry_delay: Base delay between retry attempts in seconds (default: 1.0)
+            ssl_context: Optional SSL context for TLS connections
 
         Raises:
             ValueError: If neither file_path nor file_stream provided, or chunk_size < 1
@@ -85,6 +88,7 @@ class Uploader:
         self.headers = headers or {}
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.ssl_context = ssl_context
 
         # Initialize file stream and get file size
         if file_stream:
@@ -131,7 +135,7 @@ class Uploader:
 
         try:
             req = Request(self.url, headers=headers, method="HEAD")
-            with urlopen(req) as response:
+            with urlopen(req, context=self.ssl_context) as response:
                 offset = response.headers.get("Upload-Offset")
                 if offset is None:
                     raise TusCommunicationError("Server did not return Upload-Offset header")
@@ -172,7 +176,7 @@ class Uploader:
 
         try:
             req = Request(self.url, data=data, headers=headers, method="PATCH")
-            with urlopen(req) as response:
+            with urlopen(req, context=self.ssl_context) as response:
                 # Update offset from server response
                 new_offset = response.headers.get("Upload-Offset")
                 if new_offset:

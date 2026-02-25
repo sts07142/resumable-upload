@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 
@@ -11,7 +12,13 @@ class Storage(ABC):
     """Abstract base class for storage backends."""
 
     @abstractmethod
-    def create_upload(self, upload_id: str, upload_length: int, metadata: dict[str, str]) -> None:
+    def create_upload(
+        self,
+        upload_id: str,
+        upload_length: int,
+        metadata: dict[str, str],
+        expires_at: Optional[datetime] = None,
+    ) -> None:
         """Create a new upload entry."""
         pass
 
@@ -45,6 +52,16 @@ class Storage(ABC):
         """Get the file path for an upload."""
         pass
 
+    @abstractmethod
+    def get_expired_uploads(self) -> list[str]:
+        """Get list of expired upload IDs."""
+        pass
+
+    @abstractmethod
+    def cleanup_expired_uploads(self) -> int:
+        """Delete expired uploads and return count deleted."""
+        pass
+
 
 class SQLiteStorage(Storage):
     """SQLite-based storage backend."""
@@ -76,18 +93,30 @@ class SQLiteStorage(Storage):
             )
             """
         )
+        # Migration: add expires_at column for existing databases
+        try:
+            conn.execute("ALTER TABLE uploads ADD COLUMN expires_at TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.commit()
         conn.close()
 
-    def create_upload(self, upload_id: str, upload_length: int, metadata: dict[str, str]) -> None:
+    def create_upload(
+        self,
+        upload_id: str,
+        upload_length: int,
+        metadata: dict[str, str],
+        expires_at: Optional[datetime] = None,
+    ) -> None:
         """Create a new upload entry."""
         conn = sqlite3.connect(self.db_path)
+        expires_at_str = expires_at.astimezone(timezone.utc).isoformat() if expires_at else None
         conn.execute(
             """
-            INSERT INTO uploads (upload_id, upload_length, metadata)
-            VALUES (?, ?, ?)
+            INSERT INTO uploads (upload_id, upload_length, metadata, expires_at)
+            VALUES (?, ?, ?, ?)
             """,
-            (upload_id, upload_length, json.dumps(metadata)),
+            (upload_id, upload_length, json.dumps(metadata), expires_at_str),
         )
         conn.commit()
         conn.close()
@@ -108,12 +137,24 @@ class SQLiteStorage(Storage):
         if row is None:
             return None
 
+        expires_at = None
+        raw_expires = row["expires_at"]
+        if raw_expires:
+            try:
+                dt = datetime.fromisoformat(raw_expires)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                expires_at = dt
+            except (ValueError, AttributeError):
+                pass
+
         return {
             "upload_id": row["upload_id"],
             "upload_length": row["upload_length"],
             "offset": row["offset"],
             "metadata": json.loads(row["metadata"]) if row["metadata"] else {},
             "completed": bool(row["completed"]),
+            "expires_at": expires_at,
         }
 
     def update_offset(self, upload_id: str, offset: int) -> None:
@@ -168,3 +209,22 @@ class SQLiteStorage(Storage):
     def get_file_path(self, upload_id: str) -> str:
         """Get the file path for an upload."""
         return os.path.join(self.upload_dir, upload_id)
+
+    def get_expired_uploads(self) -> list[str]:
+        """Get list of expired upload IDs."""
+        conn = sqlite3.connect(self.db_path)
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute(
+            "SELECT upload_id FROM uploads WHERE expires_at IS NOT NULL AND expires_at < ?",
+            (now,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+
+    def cleanup_expired_uploads(self) -> int:
+        """Delete expired uploads and return count deleted."""
+        expired_ids = self.get_expired_uploads()
+        for upload_id in expired_ids:
+            self.delete_upload(upload_id)
+        return len(expired_ids)

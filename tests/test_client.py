@@ -1,7 +1,9 @@
 """Test suite for client module."""
 
+import io
 import os
 import shutil
+import ssl
 import tempfile
 from http.server import HTTPServer
 from threading import Thread
@@ -11,6 +13,7 @@ import pytest
 from resumable_upload.client import TusClient
 from resumable_upload.server import TusHTTPRequestHandler, TusServer
 from resumable_upload.storage import SQLiteStorage
+from resumable_upload.url_storage import FileURLStorage
 
 
 class TestTusClient:
@@ -338,3 +341,104 @@ class TestTusClient:
         assert uploader.is_complete is True
 
         uploader.close()
+
+    # --- Phase 2.4: store_url auto-creates FileURLStorage ---
+
+    def test_store_url_auto_creates_file_storage(self, server, temp_dir):
+        """store_url=True without url_storage auto-creates FileURLStorage."""
+        url, storage = server
+        # Change working directory to temp_dir to avoid polluting project root
+        original_cwd = os.getcwd()
+        os.chdir(temp_dir)
+        try:
+            client = TusClient(url, store_url=True)
+            assert isinstance(client.url_storage, FileURLStorage)
+        finally:
+            os.chdir(original_cwd)
+            # Clean up auto-created .tus_urls.json
+            tus_file = os.path.join(temp_dir, ".tus_urls.json")
+            if os.path.exists(tus_file):
+                os.remove(tus_file)
+
+    def test_fingerprint_calculated_once(self, test_file, server, temp_dir):
+        """Fingerprint is calculated exactly once per upload_file call."""
+        url, storage = server
+        original_cwd = os.getcwd()
+        os.chdir(temp_dir)
+        try:
+            client = TusClient(url, store_url=True, chunk_size=1024)
+
+            call_count = 0
+            original_fp = client.fingerprinter.get_fingerprint
+
+            def counting_fp(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                return original_fp(*args, **kwargs)
+
+            client.fingerprinter.get_fingerprint = counting_fp
+            client.upload_file(test_file)
+            assert call_count == 1
+        finally:
+            os.chdir(original_cwd)
+            tus_file = os.path.join(temp_dir, ".tus_urls.json")
+            if os.path.exists(tus_file):
+                os.remove(tus_file)
+
+    # --- Phase 2.5: resume_upload with file_stream ---
+
+    def test_resume_upload_with_file_stream(self, client, test_file, server):
+        """resume_upload works with file_stream instead of file_path."""
+        url, storage = server
+
+        file_size = os.path.getsize(test_file)
+
+        from urllib.parse import urljoin
+        from urllib.request import Request, urlopen
+
+        # Create upload and upload partial data
+        headers = {
+            "Tus-Resumable": "1.0.0",
+            "Upload-Length": str(file_size),
+        }
+        req = Request(url, headers=headers, method="POST")
+        with urlopen(req) as response:
+            location = response.headers.get("Location")
+            upload_url = urljoin(url, location) if not location.startswith("http") else location
+
+        with open(test_file, "rb") as f:
+            chunk = f.read(1024)
+            headers = {
+                "Tus-Resumable": "1.0.0",
+                "Upload-Offset": "0",
+                "Content-Type": "application/offset+octet-stream",
+            }
+            req = Request(upload_url, data=chunk, headers=headers, method="PATCH")
+            with urlopen(req):
+                pass
+
+        # Resume using file_stream
+        with open(test_file, "rb") as f:
+            result_url = client.resume_upload(upload_url=upload_url, file_stream=f)
+
+        assert result_url == upload_url
+        upload_id = upload_url.split("/")[-1]
+        upload = storage.get_upload(upload_id)
+        assert upload["completed"] is True
+
+    # --- Phase 1.5: verify_tls_cert builds ssl_context ---
+
+    def test_verify_tls_cert_false_builds_ssl_context(self, server):
+        """verify_tls_cert=False creates an ssl_context with cert checking disabled."""
+        url, storage = server
+        client = TusClient(url, verify_tls_cert=False)
+
+        assert client.ssl_context is not None
+        assert client.ssl_context.check_hostname is False
+        assert client.ssl_context.verify_mode == ssl.CERT_NONE
+
+    def test_verify_tls_cert_true_no_ssl_context(self, server):
+        """verify_tls_cert=True (default) leaves ssl_context as None."""
+        url, storage = server
+        client = TusClient(url)
+        assert client.ssl_context is None

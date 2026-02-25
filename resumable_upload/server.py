@@ -4,13 +4,29 @@ import base64
 import binascii
 import hashlib
 import logging
+import re
 import uuid
+from datetime import datetime, timedelta, timezone
+from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Optional
 
 from resumable_upload.storage import SQLiteStorage, Storage
 
 logger = logging.getLogger(__name__)
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+_TUS_EXPOSE_HEADERS = (
+    "Upload-Offset,Location,Upload-Length,Tus-Version,Tus-Resumable,"
+    "Tus-Max-Size,Tus-Extension,Upload-Metadata,Upload-Expires"
+)
+_TUS_ALLOW_HEADERS = (
+    "Origin,X-Requested-With,Content-Type,Upload-Length,Upload-Offset,"
+    "Tus-Resumable,Upload-Metadata,Upload-Checksum,Upload-Expires"
+)
 
 
 class TusServer:
@@ -29,6 +45,8 @@ class TusServer:
         - creation: Upload creation via POST
         - termination: Upload deletion via DELETE
         - checksum: SHA1 checksum verification
+        - expiration: Upload expiration support
+        - creation-with-upload: Initial data in POST body
 
     Example:
         >>> storage = SQLiteStorage()
@@ -42,13 +60,21 @@ class TusServer:
     """
 
     TUS_VERSION = "1.0.0"
-    SUPPORTED_EXTENSIONS = ["creation", "termination", "checksum"]
+    SUPPORTED_EXTENSIONS = [
+        "creation",
+        "termination",
+        "checksum",
+        "expiration",
+        "creation-with-upload",
+    ]
 
     def __init__(
         self,
         storage: Optional[Storage] = None,
         base_path: str = "/files",
         max_size: int = 0,
+        upload_expiry: Optional[int] = None,
+        cors_allow_origins: Optional[str] = None,
     ):
         """Initialize TUS server.
 
@@ -56,10 +82,35 @@ class TusServer:
             storage: Storage backend (defaults to SQLiteStorage)
             base_path: Base URL path for uploads
             max_size: Maximum upload size in bytes (0 = unlimited)
+            upload_expiry: Upload expiry in seconds (None = no expiry)
+            cors_allow_origins: CORS allowed origins (None = no CORS headers)
         """
         self.storage = storage or SQLiteStorage()
         self.base_path = base_path.rstrip("/")
         self.max_size = max_size
+        self.upload_expiry = upload_expiry
+        self.cors_allow_origins = cors_allow_origins
+
+    def _validate_upload_id(self, upload_id: str) -> bool:
+        """Validate that upload_id is a valid UUID to prevent path traversal."""
+        return bool(_UUID_RE.match(upload_id))
+
+    def _error_response(self, status: int, message: str) -> tuple[int, dict, bytes]:
+        """Build a consistent error response with Tus-Resumable header."""
+        return (status, {"Tus-Resumable": self.TUS_VERSION}, message.encode())
+
+    def _add_cors_headers(self, headers: dict) -> dict:
+        """Add CORS headers if cors_allow_origins is configured."""
+        if self.cors_allow_origins:
+            headers["Access-Control-Allow-Origin"] = self.cors_allow_origins
+            headers["Access-Control-Expose-Headers"] = _TUS_EXPOSE_HEADERS
+            headers["Access-Control-Allow-Methods"] = "GET,POST,HEAD,PATCH,DELETE,OPTIONS"
+            headers["Access-Control-Allow-Headers"] = _TUS_ALLOW_HEADERS
+        return headers
+
+    def _format_expiry(self, expires_at: datetime) -> str:
+        """Format expiry datetime as RFC 7231 date string."""
+        return formatdate(expires_at.timestamp(), usegmt=True)
 
     def handle_request(
         self, method: str, path: str, headers: dict[str, str], body: bytes = b""
@@ -74,14 +125,6 @@ class TusServer:
 
         Returns:
             Tuple of (status_code, response_headers, response_body)
-
-        Note:
-            According to TUS protocol specification (https://tus.io/protocols/resumable-upload.html):
-            - The server checks for exact version match with Tus-Resumable header
-            - This implementation only supports TUS version 1.0.0
-            - Clients must send "Tus-Resumable: 1.0.0" header in all requests (except OPTIONS)
-            - If version doesn't match, server returns 412 Precondition Failed
-            - This is standard TUS behavior - servers are not required to support multiple versions
         """
         logger.info(f"Received {method} request for {path}")
 
@@ -89,34 +132,46 @@ class TusServer:
         headers = {k.lower(): v for k, v in headers.items()}
 
         # Check TUS version (required by TUS spec for all non-OPTIONS requests)
-        # Per spec: Server MUST check Tus-Resumable header and return 412 if not supported
         if method != "OPTIONS":
             tus_version = headers.get("tus-resumable")
             if tus_version != self.TUS_VERSION:
                 logger.warning(f"Invalid TUS version: {tus_version}, expected {self.TUS_VERSION}")
-                return (
+                status, resp_headers, resp_body = (
                     412,
                     {"Tus-Resumable": self.TUS_VERSION},
                     b"Precondition Failed: Invalid TUS version",
                 )
+                return (status, self._add_cors_headers(resp_headers), resp_body)
 
         # Route request
         if method == "OPTIONS":
-            return self._handle_options(path, headers)
+            result = self._handle_options(path, headers)
         elif method == "POST" and path == self.base_path:
-            return self._handle_create(headers, body)
+            result = self._handle_create(headers, body)
         elif method == "HEAD" and path.startswith(self.base_path + "/"):
             upload_id = path[len(self.base_path) + 1 :]
-            return self._handle_head(upload_id, headers)
+            if not self._validate_upload_id(upload_id):
+                result = self._error_response(400, "Invalid upload ID format")
+            else:
+                result = self._handle_head(upload_id, headers)
         elif method == "PATCH" and path.startswith(self.base_path + "/"):
             upload_id = path[len(self.base_path) + 1 :]
-            return self._handle_patch(upload_id, headers, body)
+            if not self._validate_upload_id(upload_id):
+                result = self._error_response(400, "Invalid upload ID format")
+            else:
+                result = self._handle_patch(upload_id, headers, body)
         elif method == "DELETE" and path.startswith(self.base_path + "/"):
             upload_id = path[len(self.base_path) + 1 :]
-            return self._handle_delete(upload_id, headers)
+            if not self._validate_upload_id(upload_id):
+                result = self._error_response(400, "Invalid upload ID format")
+            else:
+                result = self._handle_delete(upload_id, headers)
         else:
             logger.warning(f"Route not found: {method} {path}")
-            return (404, {}, b"Not Found")
+            result = self._error_response(404, "Not Found")
+
+        status, resp_headers, resp_body = result
+        return (status, self._add_cors_headers(resp_headers), resp_body)
 
     def _handle_options(
         self, path: str, headers: dict[str, str]
@@ -141,17 +196,17 @@ class TusServer:
         upload_length_str = headers.get("upload-length")
         if not upload_length_str:
             logger.error("Missing Upload-Length header")
-            return (400, {}, b"Missing Upload-Length header")
+            return self._error_response(400, "Missing Upload-Length header")
 
         try:
             upload_length = int(upload_length_str)
         except ValueError:
             logger.error(f"Invalid Upload-Length header: {upload_length_str}")
-            return (400, {}, b"Invalid Upload-Length header")
+            return self._error_response(400, "Invalid Upload-Length header")
 
         if self.max_size > 0 and upload_length > self.max_size:
             logger.warning(f"Upload size {upload_length} exceeds maximum {self.max_size}")
-            return (413, {}, b"Upload exceeds maximum size")
+            return self._error_response(413, "Upload exceeds maximum size")
 
         # Parse metadata
         metadata = {}
@@ -161,7 +216,6 @@ class TusServer:
                 pair = pair.strip()
                 if " " in pair:
                     key, value = pair.split(" ", 1)
-                    # Decode base64 value
                     try:
                         metadata[key] = base64.b64decode(value).decode("utf-8")
                     except (ValueError, UnicodeDecodeError):
@@ -170,16 +224,33 @@ class TusServer:
         # Generate upload ID
         upload_id = str(uuid.uuid4())
 
+        # Compute expiry
+        expires_at = None
+        if self.upload_expiry:
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=self.upload_expiry)
+
         # Create upload
-        self.storage.create_upload(upload_id, upload_length, metadata)
+        self.storage.create_upload(upload_id, upload_length, metadata, expires_at)
         logger.info(f"Created upload {upload_id} with length {upload_length}, metadata: {metadata}")
+
+        # Handle creation-with-upload: process initial data if provided
+        initial_offset = 0
+        content_type = headers.get("content-type", "")
+        if body and content_type == "application/offset+octet-stream":
+            self.storage.write_chunk(upload_id, 0, body)
+            initial_offset = len(body)
+            self.storage.update_offset(upload_id, initial_offset)
+            logger.info(f"creation-with-upload: wrote {initial_offset} bytes for {upload_id}")
 
         # Return response
         response_headers = {
             "Tus-Resumable": self.TUS_VERSION,
             "Location": f"{self.base_path}/{upload_id}",
-            "Upload-Offset": "0",
+            "Upload-Offset": str(initial_offset),
         }
+
+        if expires_at:
+            response_headers["Upload-Expires"] = self._format_expiry(expires_at)
 
         return (201, response_headers, b"")
 
@@ -190,7 +261,13 @@ class TusServer:
         upload = self.storage.get_upload(upload_id)
         if not upload:
             logger.warning(f"Upload not found: {upload_id}")
-            return (404, {}, b"Upload not found")
+            return self._error_response(404, "Upload not found")
+
+        # Check expiration
+        expires_at = upload.get("expires_at")
+        if expires_at and expires_at < datetime.now(timezone.utc):
+            logger.warning(f"Upload expired: {upload_id}")
+            return self._error_response(410, "Upload has expired")
 
         logger.debug(
             f"HEAD request for upload {upload_id}: "
@@ -203,11 +280,12 @@ class TusServer:
             "Cache-Control": "no-store",
         }
 
+        if expires_at:
+            response_headers["Upload-Expires"] = self._format_expiry(expires_at)
+
         # Include metadata if present
         metadata = upload.get("metadata", {})
         if metadata:
-            import base64
-
             encoded_metadata = []
             for key, value in metadata.items():
                 value_bytes = value.encode("utf-8")
@@ -224,31 +302,42 @@ class TusServer:
         upload = self.storage.get_upload(upload_id)
         if not upload:
             logger.warning(f"Upload not found: {upload_id}")
-            return (404, {}, b"Upload not found")
+            return self._error_response(404, "Upload not found")
+
+        # Check expiration
+        expires_at = upload.get("expires_at")
+        if expires_at and expires_at < datetime.now(timezone.utc):
+            logger.warning(f"Upload expired: {upload_id}")
+            return self._error_response(410, "Upload has expired")
+
+        # Check if already completed
+        if upload.get("completed"):
+            logger.warning(f"Upload already completed: {upload_id}")
+            return self._error_response(403, "Upload already completed")
 
         # Check content type
         content_type = headers.get("content-type", "")
         if content_type != "application/offset+octet-stream":
             logger.error(f"Invalid Content-Type: {content_type}")
-            return (400, {}, b"Invalid Content-Type")
+            return self._error_response(400, "Invalid Content-Type")
 
         # Check upload offset
         upload_offset_str = headers.get("upload-offset")
         if not upload_offset_str:
             logger.error("Missing Upload-Offset header")
-            return (400, {}, b"Missing Upload-Offset header")
+            return self._error_response(400, "Missing Upload-Offset header")
 
         try:
             upload_offset = int(upload_offset_str)
         except ValueError:
             logger.error(f"Invalid Upload-Offset header: {upload_offset_str}")
-            return (400, {}, b"Invalid Upload-Offset header")
+            return self._error_response(400, "Invalid Upload-Offset header")
 
         if upload_offset != upload["offset"]:
             logger.error(
                 f"Upload-Offset mismatch: expected {upload['offset']}, got {upload_offset}"
             )
-            return (409, {}, b"Upload-Offset mismatch")
+            return self._error_response(409, "Upload-Offset mismatch")
 
         # Verify checksum if provided
         upload_checksum = headers.get("upload-checksum")
@@ -260,10 +349,10 @@ class TusServer:
                     provided = base64.b64decode(checksum).hex()
                     if computed != provided:
                         logger.error(f"Checksum mismatch for upload {upload_id}")
-                        return (460, {}, b"Checksum mismatch")
+                        return self._error_response(460, "Checksum mismatch")
             except (ValueError, binascii.Error) as e:
                 logger.error(f"Invalid Upload-Checksum header: {e}")
-                return (400, {}, b"Invalid Upload-Checksum header")
+                return self._error_response(400, "Invalid Upload-Checksum header")
 
         # Write chunk
         self.storage.write_chunk(upload_id, upload_offset, body)
@@ -290,7 +379,7 @@ class TusServer:
         upload = self.storage.get_upload(upload_id)
         if not upload:
             logger.warning(f"Upload not found for deletion: {upload_id}")
-            return (404, {}, b"Upload not found")
+            return self._error_response(404, "Upload not found")
 
         self.storage.delete_upload(upload_id)
         logger.info(f"Deleted upload {upload_id}")

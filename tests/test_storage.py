@@ -2,7 +2,10 @@
 
 import os
 import shutil
+import sqlite3
 import tempfile
+import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -92,3 +95,89 @@ class TestSQLiteStorage:
         upload_id = "test-upload-5"
         expected_path = os.path.join(temp_dir, "uploads", upload_id)
         assert storage.get_file_path(upload_id) == expected_path
+
+    # --- Phase 2.1: Expiration tests ---
+
+    def test_expires_at_stored_in_db(self, storage):
+        """expires_at is stored and returned by get_upload."""
+        upload_id = str(uuid.uuid4())
+        expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        storage.create_upload(upload_id, 100, {}, expires_at=expires)
+
+        upload = storage.get_upload(upload_id)
+        assert upload is not None
+        assert upload["expires_at"] is not None
+        # Allow 2-second tolerance for processing time
+        assert abs((upload["expires_at"] - expires).total_seconds()) < 2
+
+    def test_get_expired_uploads_returns_ids(self, storage):
+        """get_expired_uploads returns IDs of expired uploads only."""
+        future_id = str(uuid.uuid4())
+        past_id = str(uuid.uuid4())
+        no_expiry_id = str(uuid.uuid4())
+
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        past = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+        storage.create_upload(future_id, 100, {}, expires_at=future)
+        storage.create_upload(past_id, 100, {}, expires_at=past)
+        storage.create_upload(no_expiry_id, 100, {})
+
+        expired = storage.get_expired_uploads()
+        assert past_id in expired
+        assert future_id not in expired
+        assert no_expiry_id not in expired
+
+    def test_cleanup_expired_uploads_removes_files(self, storage, temp_dir):
+        """cleanup_expired_uploads deletes expired uploads and their files."""
+        past_id = str(uuid.uuid4())
+        future_id = str(uuid.uuid4())
+        past = datetime.now(timezone.utc) - timedelta(seconds=1)
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        storage.create_upload(past_id, 100, {}, expires_at=past)
+        storage.create_upload(future_id, 100, {}, expires_at=future)
+
+        past_file = storage.get_file_path(past_id)
+        assert os.path.exists(past_file)
+
+        count = storage.cleanup_expired_uploads()
+        assert count == 1
+        assert storage.get_upload(past_id) is None
+        assert not os.path.exists(past_file)
+        # Non-expired upload should remain
+        assert storage.get_upload(future_id) is not None
+
+    def test_existing_db_migration_adds_expires_at(self, temp_dir):
+        """Re-initializing an old DB (without expires_at) adds the column."""
+        db_path = os.path.join(temp_dir, "old.db")
+        upload_dir = os.path.join(temp_dir, "uploads_old")
+        os.makedirs(upload_dir, exist_ok=True)
+
+        # Create a DB without expires_at column (simulating old schema)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE uploads (
+                upload_id TEXT PRIMARY KEY,
+                upload_length INTEGER NOT NULL,
+                offset INTEGER DEFAULT 0,
+                metadata TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed BOOLEAN DEFAULT 0
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        # Initializing SQLiteStorage should add expires_at via migration
+        storage = SQLiteStorage(db_path=db_path, upload_dir=upload_dir)
+
+        # Verify column exists by using it
+        upload_id = str(uuid.uuid4())
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        storage.create_upload(upload_id, 100, {}, expires_at=future)
+
+        upload = storage.get_upload(upload_id)
+        assert upload["expires_at"] is not None

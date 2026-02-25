@@ -5,11 +5,15 @@ import os
 import sys
 import time
 
-from resumable_upload import TusClient, Uploader
+from resumable_upload import TusClient, Uploader, UploadStats
 
 
-def progress_callback(uploaded, total):
+def progress_callback(stats: UploadStats) -> None:
     """Display upload progress."""
+    uploaded = stats.uploaded_bytes
+    total = stats.total_bytes
+    if total == 0:
+        return
     percent = (uploaded / total) * 100
     bar_length = 50
     filled = int(bar_length * uploaded / total)

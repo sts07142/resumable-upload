@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import ssl
 import tempfile
 from http.server import HTTPServer
 from threading import Thread
@@ -354,3 +355,21 @@ class TestUploader:
 
         with pytest.raises(ValueError, match="chunk_size must be at least 1"):
             Uploader(url=upload_url, file_path=test_file, chunk_size=-1)
+
+    # --- Phase 1.5: ssl_context passed to Uploader ---
+
+    def test_ssl_context_passed_to_urlopen(self, test_file, server):
+        """ssl_context from TusClient is passed through to Uploader."""
+        url, storage = server
+
+        client = TusClient(url, verify_tls_cert=False)
+        # ssl_context should be set on the client
+        assert client.ssl_context is not None
+        assert client.ssl_context.check_hostname is False
+        assert client.ssl_context.verify_mode == ssl.CERT_NONE
+
+        # create_uploader should propagate ssl_context to the Uploader
+        uploader = client.create_uploader(test_file)
+        assert uploader.ssl_context is client.ssl_context
+
+        uploader.close()

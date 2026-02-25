@@ -3,6 +3,7 @@
 import base64
 import os
 import re
+import ssl
 from typing import IO, Any, Callable, Optional, Union
 from urllib.error import HTTPError
 from urllib.parse import urljoin
@@ -12,7 +13,7 @@ from resumable_upload.client.stats import UploadStats
 from resumable_upload.client.uploader import Uploader
 from resumable_upload.exceptions import TusCommunicationError
 from resumable_upload.fingerprint import Fingerprint
-from resumable_upload.url_storage import URLStorage
+from resumable_upload.url_storage import FileURLStorage, URLStorage
 
 
 class TusClient:
@@ -87,11 +88,24 @@ class TusClient:
         self.verify_tls_cert = verify_tls_cert
         self.metadata_encoding = metadata_encoding
         self.store_url = store_url
+        # Auto-create FileURLStorage when store_url=True and no storage provided
+        if store_url and url_storage is None:
+            url_storage = FileURLStorage()
         self.url_storage = url_storage
         self.fingerprinter = fingerprinter or Fingerprint()
         self.headers = headers or {}
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.ssl_context = self._build_ssl_context()
+
+    def _build_ssl_context(self) -> Optional[ssl.SSLContext]:
+        """Build SSL context based on verify_tls_cert setting."""
+        if not self.verify_tls_cert:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            return ctx
+        return None
 
     def upload_file(
         self,
@@ -138,17 +152,22 @@ class TusClient:
         if "filename" not in metadata and file_path:
             metadata["filename"] = os.path.basename(file_path)
 
+        # Calculate fingerprint once (avoid double computation)
+        fingerprint = (
+            self.fingerprinter.get_fingerprint(file_path or file_stream)
+            if self.store_url
+            else None
+        )
+
         # Check for stored URL if enabled
         upload_url = None
-        if self.store_url and self.url_storage:
-            fingerprint = self.fingerprinter.get_fingerprint(file_path or file_stream)
+        if self.store_url:
             upload_url = self.url_storage.get_url(fingerprint)
 
         # Create upload if no stored URL
         if not upload_url:
             upload_url = self._create_upload(file_size, metadata)
-            if self.store_url and self.url_storage:
-                fingerprint = self.fingerprinter.get_fingerprint(file_path or file_stream)
+            if self.store_url:
                 self.url_storage.set_url(fingerprint, upload_url)
 
         uploader = Uploader(
@@ -161,6 +180,7 @@ class TusClient:
             headers=self.headers.copy(),
             max_retries=self.max_retries,
             retry_delay=self.retry_delay,
+            ssl_context=self.ssl_context,
         )
 
         try:
@@ -171,15 +191,17 @@ class TusClient:
 
     def resume_upload(
         self,
-        file_path: str,
-        upload_url: str,
+        file_path: Optional[str] = None,
+        upload_url: str = "",
+        file_stream: Optional[IO] = None,
         progress_callback: Optional[Callable[[UploadStats], None]] = None,
     ) -> str:
         """Resume an interrupted upload.
 
         Args:
-            file_path: Path to file to upload
+            file_path: Path to file to upload (required if file_stream not provided)
             upload_url: URL of the existing upload
+            file_stream: File stream to upload (alternative to file_path)
             progress_callback: Optional callback function that receives UploadStats
 
         Returns:
@@ -189,17 +211,22 @@ class TusClient:
             FileNotFoundError: If file doesn't exist
             HTTPError: If upload fails
         """
-        if not os.path.exists(file_path):
+        if file_path and not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
+        if not file_path and not file_stream:
+            raise ValueError("Either file_path or file_stream must be provided")
+
         uploader = Uploader(
             url=upload_url,
             file_path=file_path,
+            file_stream=file_stream,
             chunk_size=self.chunk_size,
             checksum=self.checksum,
             metadata_encoding=self.metadata_encoding,
             headers=self.headers.copy(),
             max_retries=self.max_retries,
             retry_delay=self.retry_delay,
+            ssl_context=self.ssl_context,
         )
 
         try:
@@ -224,13 +251,18 @@ class TusClient:
 
         req = Request(upload_url, headers=headers, method="DELETE")
         try:
-            with urlopen(req):
+            with urlopen(req, context=self.ssl_context):
                 pass
         except HTTPError as e:
             if e.code != 404:
                 raise
 
-    def _create_upload(self, file_size: int, metadata: dict[str, str]) -> str:
+    def _create_upload(
+        self,
+        file_size: int,
+        metadata: dict[str, str],
+        initial_data: Optional[bytes] = None,
+    ) -> str:
         """Create a new upload on the server."""
         # Encode metadata
         encoded_metadata = self.encode_metadata(metadata)
@@ -244,9 +276,15 @@ class TusClient:
         if encoded_metadata:
             headers["Upload-Metadata"] = ",".join(encoded_metadata)
 
+        body = b""
+        if initial_data is not None:
+            body = initial_data
+            headers["Content-Type"] = "application/offset+octet-stream"
+            headers["Content-Length"] = str(len(initial_data))
+
         try:
-            req = Request(self.url, headers=headers, method="POST")
-            with urlopen(req) as response:
+            req = Request(self.url, data=body or None, headers=headers, method="POST")
+            with urlopen(req, context=self.ssl_context) as response:
                 location = response.headers.get("Location")
                 if not location:
                     raise TusCommunicationError("Server did not return Location header")
@@ -384,7 +422,7 @@ class TusClient:
 
         try:
             req = Request(upload_url, headers=headers, method="HEAD")
-            with urlopen(req) as response:
+            with urlopen(req, context=self.ssl_context) as response:
                 upload_metadata = response.headers.get("Upload-Metadata")
                 if not upload_metadata:
                     return {}
@@ -438,7 +476,7 @@ class TusClient:
 
         try:
             req = Request(upload_url, headers=headers, method="HEAD")
-            with urlopen(req) as response:
+            with urlopen(req, context=self.ssl_context) as response:
                 offset_str = response.headers.get("Upload-Offset")
                 length_str = response.headers.get("Upload-Length")
 
@@ -494,7 +532,7 @@ class TusClient:
         """
         try:
             req = Request(self.url, method="OPTIONS")
-            with urlopen(req) as response:
+            with urlopen(req, context=self.ssl_context) as response:
                 tus_version = response.headers.get("Tus-Version", self.TUS_VERSION)
                 tus_extension = response.headers.get("Tus-Extension", "")
                 tus_max_size = response.headers.get("Tus-Max-Size")
@@ -578,4 +616,5 @@ class TusClient:
             headers=self.headers.copy(),
             max_retries=self.max_retries,
             retry_delay=self.retry_delay,
+            ssl_context=self.ssl_context,
         )
