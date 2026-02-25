@@ -208,9 +208,7 @@ class TestTusServer:
         """Non-UUID upload_id is rejected with 400."""
         headers = {"tus-resumable": "1.0.0"}
         for bad_id in ["../etc/passwd", "nonexistent", "../../secret", "foo bar"]:
-            status, resp_headers, body = server.handle_request(
-                "HEAD", f"/files/{bad_id}", headers
-            )
+            status, resp_headers, body = server.handle_request("HEAD", f"/files/{bad_id}", headers)
             assert status == 400, f"Expected 400 for id={bad_id!r}, got {status}"
             assert "Tus-Resumable" in resp_headers
 
@@ -229,9 +227,7 @@ class TestTusServer:
         storage.create_upload(upload_id, 50, {})
 
         headers = {"tus-resumable": "1.0.0"}
-        status, resp_headers, body = server.handle_request(
-            "HEAD", f"/files/{upload_id}", headers
-        )
+        status, resp_headers, body = server.handle_request("HEAD", f"/files/{upload_id}", headers)
         assert status == 200
 
     # --- Phase 1.3: Completed upload PATCH ---
@@ -368,9 +364,7 @@ class TestTusServer:
             "upload-length": "100",
             "content-type": "application/offset+octet-stream",
         }
-        status, resp_headers, body = server.handle_request(
-            "POST", "/files", headers, initial_data
-        )
+        status, resp_headers, body = server.handle_request("POST", "/files", headers, initial_data)
         assert status == 201
         assert resp_headers["Upload-Offset"] == str(len(initial_data))
 
@@ -382,9 +376,7 @@ class TestTusServer:
             "upload-length": "100",
             "content-type": "application/offset+octet-stream",
         }
-        status, resp_headers, body = server.handle_request(
-            "POST", "/files", headers, initial_data
-        )
+        status, resp_headers, body = server.handle_request("POST", "/files", headers, initial_data)
         assert status == 201
         upload_id = resp_headers["Location"].split("/")[-1]
         upload = storage.get_upload(upload_id)
@@ -440,9 +432,7 @@ class TestTusServer:
             "content-type": "application/offset+octet-stream",
         }
         # Send 200 bytes when upload_length is 100
-        status, _, _ = server.handle_request(
-            "PATCH", f"/files/{upload_id}", headers, b"x" * 200
-        )
+        status, _, _ = server.handle_request("PATCH", f"/files/{upload_id}", headers, b"x" * 200)
         assert status == 400
 
     def test_patch_negative_offset_returns_400(self, server):
@@ -455,9 +445,7 @@ class TestTusServer:
             "upload-offset": "-1",
             "content-type": "application/offset+octet-stream",
         }
-        status, _, _ = server.handle_request(
-            "PATCH", f"/files/{upload_id}", headers, b"data"
-        )
+        status, _, _ = server.handle_request("PATCH", f"/files/{upload_id}", headers, b"data")
         assert status == 400
 
     def test_expired_uploads_cleaned_up_after_request(self, storage):
@@ -481,8 +469,135 @@ class TestTusServer:
             "upload-length": "50",
             "content-type": "application/json",  # Wrong type — body ignored per TUS spec
         }
-        status, resp_headers, _ = server.handle_request(
-            "POST", "/files", headers, b"x" * 10
-        )
+        status, resp_headers, _ = server.handle_request("POST", "/files", headers, b"x" * 10)
         assert status == 201
         assert resp_headers.get("Upload-Offset") == "0"  # Body was not processed
+
+    # --- TUS spec compliance ---
+
+    def test_options_includes_tus_checksum_algorithm(self, server):
+        """OPTIONS response includes Tus-Checksum-Algorithm: sha1."""
+        status, headers, _ = server.handle_request("OPTIONS", "/files", {})
+        assert status == 204
+        assert headers.get("Tus-Checksum-Algorithm") == "sha1"
+
+    def test_patch_response_includes_upload_expires_when_expiry_set(self, storage):
+        """PATCH response includes Upload-Expires header when upload has expiry."""
+        server = TusServer(storage=storage, upload_expiry=3600)
+        upload_id = str(uuid.uuid4())
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        storage.create_upload(upload_id, 100, {}, expires_at=future)
+
+        headers = {
+            "tus-resumable": "1.0.0",
+            "upload-offset": "0",
+            "content-type": "application/offset+octet-stream",
+        }
+        status, resp_headers, _ = server.handle_request(
+            "PATCH", f"/files/{upload_id}", headers, b"data"
+        )
+        assert status == 204
+        assert "Upload-Expires" in resp_headers
+
+    def test_create_negative_upload_length_returns_400(self, server):
+        """POST with negative Upload-Length is rejected with 400."""
+        headers = {
+            "tus-resumable": "1.0.0",
+            "upload-length": "-1",
+        }
+        status, _, _ = server.handle_request("POST", "/files", headers)
+        assert status == 400
+
+    def test_create_zero_length_upload_is_valid(self, server, storage):
+        """POST with Upload-Length: 0 creates an immediately completed upload."""
+        headers = {
+            "tus-resumable": "1.0.0",
+            "upload-length": "0",
+        }
+        status, resp_headers, _ = server.handle_request("POST", "/files", headers)
+        assert status == 201
+        assert resp_headers["Upload-Offset"] == "0"
+        upload_id = resp_headers["Location"].split("/")[-1]
+        upload = storage.get_upload(upload_id)
+        assert upload is not None
+        assert upload["upload_length"] == 0
+
+    def test_patch_empty_body_is_valid(self, server, storage):
+        """PATCH with empty body is valid and leaves offset unchanged."""
+        upload_id = str(uuid.uuid4())
+        storage.create_upload(upload_id, 100, {})
+
+        headers = {
+            "tus-resumable": "1.0.0",
+            "upload-offset": "0",
+            "content-type": "application/offset+octet-stream",
+        }
+        status, resp_headers, _ = server.handle_request(
+            "PATCH", f"/files/{upload_id}", headers, b""
+        )
+        assert status == 204
+        assert resp_headers["Upload-Offset"] == "0"
+
+    def test_checksum_mismatch_returns_460(self, server, storage):
+        """PATCH with wrong Upload-Checksum returns 460."""
+        import base64
+        import hashlib
+
+        upload_id = str(uuid.uuid4())
+        storage.create_upload(upload_id, 100, {})
+
+        data = b"hello"
+        wrong_checksum = base64.b64encode(hashlib.sha1(b"wrong data").digest()).decode()
+        headers = {
+            "tus-resumable": "1.0.0",
+            "upload-offset": "0",
+            "content-type": "application/offset+octet-stream",
+            "upload-checksum": f"sha1 {wrong_checksum}",
+        }
+        status, _, _ = server.handle_request("PATCH", f"/files/{upload_id}", headers, data)
+        assert status == 460
+
+    def test_head_includes_cache_control_no_store(self, server, storage):
+        """HEAD response includes Cache-Control: no-store."""
+        upload_id = str(uuid.uuid4())
+        storage.create_upload(upload_id, 100, {})
+
+        headers = {"tus-resumable": "1.0.0"}
+        status, resp_headers, _ = server.handle_request("HEAD", f"/files/{upload_id}", headers)
+        assert status == 200
+        assert resp_headers.get("Cache-Control") == "no-store"
+
+    def test_expired_upload_head_returns_410(self, storage):
+        """HEAD on expired upload returns 410 Gone."""
+        server = TusServer(storage=storage, upload_expiry=3600)
+        upload_id = str(uuid.uuid4())
+        past = datetime.now(timezone.utc) - timedelta(seconds=1)
+        storage.create_upload(upload_id, 100, {}, expires_at=past)
+
+        status, resp_headers, _ = server.handle_request(
+            "HEAD", f"/files/{upload_id}", {"tus-resumable": "1.0.0"}
+        )
+        assert status == 410
+        assert resp_headers.get("Tus-Resumable") == "1.0.0"
+
+    def test_checksum_correct_patch_succeeds(self, server, storage):
+        """PATCH with correct Upload-Checksum succeeds."""
+        import base64
+        import hashlib
+
+        upload_id = str(uuid.uuid4())
+        storage.create_upload(upload_id, 100, {})
+
+        data = b"hello world"
+        checksum = base64.b64encode(hashlib.sha1(data).digest()).decode()
+        headers = {
+            "tus-resumable": "1.0.0",
+            "upload-offset": "0",
+            "content-type": "application/offset+octet-stream",
+            "upload-checksum": f"sha1 {checksum}",
+        }
+        status, resp_headers, _ = server.handle_request(
+            "PATCH", f"/files/{upload_id}", headers, data
+        )
+        assert status == 204
+        assert resp_headers["Upload-Offset"] == str(len(data))

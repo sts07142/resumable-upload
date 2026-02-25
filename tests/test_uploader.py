@@ -371,9 +371,11 @@ class TestUploader:
 
         uploader = Uploader(url=upload_url, file_path=test_file)
 
-        with patch("resumable_upload.client.uploader.urlopen", side_effect=URLError("network error")):
-            with pytest.raises(TusCommunicationError):
-                uploader._get_offset()
+        urlopen_err = patch(
+            "resumable_upload.client.uploader.urlopen", side_effect=URLError("network error")
+        )
+        with urlopen_err, pytest.raises(TusCommunicationError):
+            uploader._get_offset()
 
         uploader.close()
 
@@ -406,6 +408,115 @@ class TestUploader:
 
         uploader.close()
 
+    def test_upload_chunk_retry_max_retries_respected(self, test_file, server):
+        """upload_chunk retries exactly max_retries times before giving up."""
+        import unittest.mock
+        from urllib.error import URLError
+
+        from resumable_upload.exceptions import TusUploadFailed
+
+        url, _ = server
+        from urllib.parse import urljoin
+        from urllib.request import Request, urlopen
+
+        file_size = os.path.getsize(test_file)
+        headers = {"Tus-Resumable": "1.0.0", "Upload-Length": str(file_size)}
+        req = Request(url, headers=headers, method="POST")
+        with urlopen(req) as response:
+            location = response.headers.get("Location")
+            upload_url = urljoin(url, location) if not location.startswith("http") else location
+
+        call_count = 0
+
+        def failing_urlopen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise URLError("always fails")
+
+        max_retries = 2
+        uploader = Uploader(
+            url=upload_url,
+            file_path=test_file,
+            chunk_size=1024,
+            max_retries=max_retries,
+            retry_delay=0.0,
+        )
+
+        urlopen_patch = unittest.mock.patch(
+            "resumable_upload.client.uploader.urlopen", side_effect=failing_urlopen
+        )
+        with urlopen_patch, pytest.raises(TusUploadFailed):
+            uploader.upload_chunk()
+
+        # Initial attempt + max_retries retries
+        assert call_count == max_retries + 1
+        uploader.close()
+
+    def test_upload_chunk_retry_increments_chunks_retried_stat(self, test_file, server):
+        """chunks_retried stat is incremented when a retry succeeds."""
+        import unittest.mock
+        from urllib.error import URLError
+        from urllib.parse import urljoin
+        from urllib.request import Request
+        from urllib.request import urlopen as real_urlopen
+
+        url, _ = server
+
+        file_size = os.path.getsize(test_file)
+        req_headers = {"Tus-Resumable": "1.0.0", "Upload-Length": str(file_size)}
+        req = Request(url, headers=req_headers, method="POST")
+        with real_urlopen(req) as response:
+            location = response.headers.get("Location")
+            upload_url = urljoin(url, location) if not location.startswith("http") else location
+
+        attempt = 0
+
+        def fail_once(*args, **kwargs):
+            nonlocal attempt
+            attempt += 1
+            if attempt == 1:
+                raise URLError("first attempt fails")
+            return real_urlopen(*args, **kwargs)
+
+        uploader = Uploader(
+            url=upload_url,
+            file_path=test_file,
+            chunk_size=1024,
+            max_retries=2,
+            retry_delay=0.0,
+        )
+
+        urlopen_once = unittest.mock.patch(
+            "resumable_upload.client.uploader.urlopen", side_effect=fail_once
+        )
+        with urlopen_once:
+            uploader.upload_chunk()
+
+        assert uploader.stats.chunks_retried == 1
+        uploader.close()
+
+    def test_upload_with_stop_at_less_than_current_offset_is_noop(self, test_file, server):
+        """upload(stop_at=N) where N <= current offset does nothing."""
+        url, _ = server
+        from urllib.parse import urljoin
+        from urllib.request import Request, urlopen
+
+        file_size = os.path.getsize(test_file)
+        headers = {"Tus-Resumable": "1.0.0", "Upload-Length": str(file_size)}
+        req = Request(url, headers=headers, method="POST")
+        with urlopen(req) as response:
+            location = response.headers.get("Location")
+            upload_url = urljoin(url, location) if not location.startswith("http") else location
+
+        uploader = Uploader(url=upload_url, file_path=test_file, chunk_size=1024)
+        uploader.upload(stop_at=2048)
+        assert uploader.offset == 2048
+
+        # stop_at below current offset → no additional upload
+        uploader.upload(stop_at=1024)
+        assert uploader.offset == 2048  # unchanged
+        uploader.close()
+
     def test_upload_chunk_raises_on_truncated_file(self, test_file, server):
         """upload_chunk() raises OSError if file is shorter than expected."""
         import unittest.mock
@@ -425,8 +536,8 @@ class TestUploader:
         uploader = Uploader(url=upload_url, file_path=test_file, chunk_size=1024)
 
         # Simulate a file that returns empty bytes unexpectedly
-        with unittest.mock.patch.object(uploader._file_handle, "read", return_value=b""):
-            with pytest.raises(OSError, match="Unexpected end of file"):
-                uploader.upload_chunk()
+        read_patch = unittest.mock.patch.object(uploader._file_handle, "read", return_value=b"")
+        with read_patch, pytest.raises(OSError, match="Unexpected end of file"):
+            uploader.upload_chunk()
 
         uploader.close()

@@ -121,7 +121,6 @@ class TestFingerprint:
         finally:
             os.unlink(temp_path)
 
-
     def test_fingerprint_differs_for_files_with_same_first_64kb(self):
         """Files differing only after the first 64KB get distinct fingerprints."""
         block = b"x" * (64 * 1024)  # exactly 64KB prefix
@@ -273,9 +272,9 @@ class TestURLStorage:
             storage.set_url("fp_existing", "url_existing")
 
             # Simulate crash: make os.replace raise so the file is never overwritten
-            with unittest.mock.patch("os.replace", side_effect=OSError("disk full")):
-                with pytest.raises(OSError):
-                    storage.set_url("fp_new", "url_new")
+            replace_err = unittest.mock.patch("os.replace", side_effect=OSError("disk full"))
+            with replace_err, pytest.raises(OSError):
+                storage.set_url("fp_new", "url_new")
 
             # Original data must still be intact
             assert storage.get_url("fp_existing") == "url_existing"
@@ -312,8 +311,10 @@ class TestURLStorage:
 
             t1 = threading.Thread(target=writer)
             t2 = threading.Thread(target=reader)
-            t1.start(); t2.start()
-            t1.join(); t2.join()
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
             assert not errors
         finally:
             os.unlink(storage_path)

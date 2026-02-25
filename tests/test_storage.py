@@ -148,6 +148,33 @@ class TestSQLiteStorage:
         # Non-expired upload should remain
         assert storage.get_upload(future_id) is not None
 
+    def test_metadata_special_characters_roundtrip(self, storage):
+        """Metadata with unicode, quotes, and backslashes round-trips correctly."""
+        upload_id = str(uuid.uuid4())
+        metadata = {
+            "filename": "résumé café.txt",
+            "path": "C:\\Users\\test\\file.bin",
+            "note": 'has "quotes" and\nnewlines',
+        }
+        storage.create_upload(upload_id, 100, metadata)
+        retrieved = storage.get_upload(upload_id)
+        assert retrieved["metadata"] == metadata
+
+    def test_create_upload_rolls_back_db_if_file_creation_fails(self, storage, temp_dir):
+        """If upload file cannot be created, the DB record is also rolled back."""
+        upload_id = str(uuid.uuid4())
+        upload_dir = os.path.join(temp_dir, "uploads")
+
+        # Make the upload directory read-only so file creation fails
+        os.chmod(upload_dir, 0o444)
+        try:
+            with pytest.raises(OSError):
+                storage.create_upload(upload_id, 100, {})
+            # DB record must not exist
+            assert storage.get_upload(upload_id) is None
+        finally:
+            os.chmod(upload_dir, 0o755)
+
     def test_existing_db_migration_adds_expires_at(self, temp_dir):
         """Re-initializing an old DB (without expires_at) adds the column."""
         db_path = os.path.join(temp_dir, "old.db")

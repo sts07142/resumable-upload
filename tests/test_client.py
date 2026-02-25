@@ -1,6 +1,5 @@
 """Test suite for client module."""
 
-import io
 import os
 import shutil
 import ssl
@@ -440,9 +439,11 @@ class TestTusClient:
         url, storage = server
         client = TusClient(url)
 
-        with patch("resumable_upload.client.base.urlopen", side_effect=URLError("network error")):
-            with pytest.raises(TusCommunicationError):
-                client.upload_file(test_file)
+        urlopen_err = patch(
+            "resumable_upload.client.base.urlopen", side_effect=URLError("network error")
+        )
+        with urlopen_err, pytest.raises(TusCommunicationError):
+            client.upload_file(test_file)
 
     # --- Phase 1.5: verify_tls_cert builds ssl_context ---
 
@@ -476,3 +477,87 @@ class TestTusClient:
         uploader = client.create_uploader(test_file)
         assert uploader.timeout == 10.0
         uploader.close()
+
+    # --- Data integrity ---
+
+    def test_upload_file_data_integrity(self, client, test_file, server):
+        """Uploaded file content matches original file byte-for-byte."""
+        url, storage = server
+
+        with open(test_file, "rb") as f:
+            original_data = f.read()
+
+        upload_url = client.upload_file(test_file)
+        upload_id = upload_url.split("/")[-1]
+        uploaded_data = storage.read_file(upload_id)
+
+        assert uploaded_data == original_data
+
+    def test_upload_stream_data_integrity(self, test_file, server):
+        """Uploaded stream content matches original bytes."""
+        url, storage = server
+        client = TusClient(url, chunk_size=1024)
+
+        with open(test_file, "rb") as f:
+            original_data = f.read()
+
+        with open(test_file, "rb") as f:
+            upload_url = client.upload_file(file_stream=f, metadata={"filename": "test.txt"})
+
+        upload_id = upload_url.split("/")[-1]
+        uploaded_data = storage.read_file(upload_id)
+        assert uploaded_data == original_data
+
+    # --- store_url cross-session resumability ---
+
+    def test_upload_with_store_url_reuses_same_url(self, test_file, server, temp_dir):
+        """With store_url=True, uploading the same file twice uses the same URL."""
+        url, storage = server
+        tus_file = os.path.join(temp_dir, ".tus_urls.json")
+        url_storage = FileURLStorage(tus_file)
+        client = TusClient(url, store_url=True, url_storage=url_storage, chunk_size=1024)
+
+        url1 = client.upload_file(test_file)
+        url2 = client.upload_file(test_file)
+
+        assert url1 == url2
+
+    def test_resume_with_stale_url_raises(self, client, test_file, server):
+        """resume_upload with a URL that no longer exists raises TusCommunicationError."""
+        from resumable_upload.exceptions import TusCommunicationError
+
+        url, _ = server
+        stale_url = f"{url}/00000000-0000-0000-0000-000000000099"
+
+        with pytest.raises(TusCommunicationError):
+            client.resume_upload(file_path=test_file, upload_url=stale_url)
+
+    # --- Resource cleanup ---
+
+    def test_upload_file_closes_handle_on_server_error(self, test_file, server):
+        """File handle is closed even when upload raises an exception."""
+        from unittest.mock import patch
+        from urllib.error import URLError
+
+        from resumable_upload.exceptions import TusCommunicationError
+
+        url, _ = server
+        client = TusClient(url)
+
+        open_handles = []
+        original_open = open
+
+        def tracking_open(path, *args, **kwargs):
+            fh = original_open(path, *args, **kwargs)
+            open_handles.append(fh)
+            return fh
+
+        open_patch = patch("builtins.open", side_effect=tracking_open)
+        urlopen_err = patch(
+            "resumable_upload.client.base.urlopen", side_effect=URLError("network error")
+        )
+        with open_patch, urlopen_err, pytest.raises(TusCommunicationError):
+            client.upload_file(test_file)
+
+        for fh in open_handles:
+            assert fh.closed, "File handle was not closed after exception"
