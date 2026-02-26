@@ -14,6 +14,10 @@ from resumable_upload.client.stats import UploadStats
 from resumable_upload.exceptions import TusCommunicationError, TusUploadFailed
 
 
+class _OffsetMismatch(Exception):
+    """Internal: server returned 409 — caller must re-sync offset before retrying."""
+
+
 class Uploader:
     """TUS protocol uploader for fine-grained upload control.
 
@@ -194,9 +198,17 @@ class Uploader:
                     self.offset = int(new_offset)
                 else:
                     self.offset += len(data)
-        except (HTTPError, URLError) as e:
+        except HTTPError as e:
+            if e.code == 409:
+                raise _OffsetMismatch(
+                    f"Server offset mismatch at local offset {self.offset}: {e}"
+                ) from e
             raise TusUploadFailed(
-                f"Failed to upload chunk at offset {self.offset}: {str(e)}",
+                f"Failed to upload chunk at offset {self.offset}: {e}",
+            ) from e
+        except URLError as e:
+            raise TusUploadFailed(
+                f"Failed to upload chunk at offset {self.offset}: {e}",
             ) from e
 
     def _update_stats_after_chunk(self) -> None:
@@ -228,6 +240,8 @@ class Uploader:
                 # Update stats after successful upload
                 self._update_stats_after_chunk()
                 return  # Success
+            except _OffsetMismatch:
+                raise  # Don't retry 409; caller must re-sync offset via HEAD
             except (TusUploadFailed, OSError) as e:
                 last_error = e
                 if attempt < self.max_retries:
@@ -271,8 +285,13 @@ class Uploader:
                 f"(file size reported as {self.file_size} bytes)"
             )
 
-        # Upload chunk (stats are automatically updated inside _upload_chunk)
-        self._upload_chunk(chunk)
+        try:
+            # Upload chunk (stats are automatically updated inside _upload_chunk)
+            self._upload_chunk(chunk)
+        except _OffsetMismatch:
+            # Server offset diverged (409); re-sync via HEAD
+            self.offset = self._get_offset()
+            self._file_handle.seek(self.offset)
 
         return self.offset < self.file_size
 
@@ -306,8 +325,14 @@ class Uploader:
                     f"(file size reported as {self.file_size} bytes)"
                 )
 
-            # Upload chunk (stats are automatically updated inside _upload_chunk)
-            self._upload_chunk(chunk)
+            try:
+                # Upload chunk (stats are automatically updated inside _upload_chunk)
+                self._upload_chunk(chunk)
+            except _OffsetMismatch:
+                # Server offset diverged (409); re-sync via HEAD and retry chunk
+                self.offset = self._get_offset()
+                self._file_handle.seek(self.offset)
+                continue
 
             if progress_callback:
                 progress_callback(self.stats)
