@@ -41,6 +41,19 @@ class Storage(ABC):
         """Update the current offset of an upload."""
         pass
 
+    def update_offset_atomic(self, upload_id: str, expected_offset: int, new_offset: int) -> bool:
+        """Update offset only if current value equals expected_offset.
+
+        Returns True on success, False if offset already changed (concurrent conflict).
+        Default implementation is non-atomic; SQLiteStorage overrides with a
+        single conditional UPDATE for true atomicity.
+        """
+        upload = self.get_upload(upload_id)
+        if upload is None or upload["offset"] != expected_offset:
+            return False
+        self.update_offset(upload_id, new_offset)
+        return True
+
     @abstractmethod
     def delete_upload(self, upload_id: str) -> None:
         """Delete an upload entry."""
@@ -193,6 +206,20 @@ class SQLiteStorage(Storage):
                 (offset, offset, upload_id),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def update_offset_atomic(self, upload_id: str, expected_offset: int, new_offset: int) -> bool:
+        """Atomically update offset; returns False on concurrent conflict."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "UPDATE uploads SET offset = ?, completed = (? >= upload_length)"
+                " WHERE upload_id = ? AND offset = ?",
+                (new_offset, new_offset, upload_id, expected_offset),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
         finally:
             conn.close()
 

@@ -411,9 +411,11 @@ class TusServer:
             logger.error(f"Chunk exceeds upload length: {new_offset} > {upload['upload_length']}")
             return self._error_response(400, "Chunk would exceed declared upload length")
 
-        # Write chunk
+        # Write chunk then atomically advance offset.
+        # If another concurrent request already advanced the offset, return 409.
         self.storage.write_chunk(upload_id, upload_offset, body)
-        self.storage.update_offset(upload_id, new_offset)
+        if not self.storage.update_offset_atomic(upload_id, upload_offset, new_offset):
+            return self._error_response(409, "Concurrent write conflict; use HEAD to re-sync")
 
         logger.info(
             f"PATCH upload {upload_id}: wrote {len(body)} bytes, "
