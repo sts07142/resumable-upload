@@ -4,9 +4,17 @@ import contextlib
 import json
 import os
 import sqlite3
+import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+try:
+    import fcntl as _fcntl
+
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
 
 
 class Storage(ABC):
@@ -77,7 +85,16 @@ class SQLiteStorage(Storage):
         self.db_path = db_path
         self.upload_dir = upload_dir
         os.makedirs(upload_dir, exist_ok=True)
+        self._file_locks: dict[str, threading.Lock] = {}
+        self._file_locks_lock = threading.Lock()
         self._init_db()
+
+    def _get_file_lock(self, upload_id: str) -> threading.Lock:
+        """Get or create a per-upload threading lock."""
+        with self._file_locks_lock:
+            if upload_id not in self._file_locks:
+                self._file_locks[upload_id] = threading.Lock()
+            return self._file_locks[upload_id]
 
     def _init_db(self) -> None:
         """Initialize database schema."""
@@ -193,14 +210,24 @@ class SQLiteStorage(Storage):
         if os.path.exists(file_path):
             os.remove(file_path)
 
+        # Remove per-upload lock entry
+        with self._file_locks_lock:
+            self._file_locks.pop(upload_id, None)
+
     def write_chunk(self, upload_id: str, offset: int, data: bytes) -> None:
-        """Write a chunk of data to the upload file."""
+        """Write a chunk of data to the upload file.
+
+        Thread-safe and multi-process-safe: uses a per-upload threading.Lock
+        (in-process) combined with fcntl.flock (cross-process, POSIX only).
+        """
         file_path = self.get_file_path(upload_id)
-        # Ensure file exists before writing
         if not os.path.exists(file_path):
-            with open(file_path, "wb") as f:
+            with open(file_path, "wb"):
                 pass
-        with open(file_path, "r+b") as f:
+        lock = self._get_file_lock(upload_id)
+        with lock, open(file_path, "r+b") as f:
+            if _HAS_FCNTL:
+                _fcntl.flock(f, _fcntl.LOCK_EX)
             f.seek(offset)
             f.write(data)
 
