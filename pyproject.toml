@@ -32,7 +32,7 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/sts07142/resumable-upload"
-Documentation = "https://github.com/sts07142/resumable-upload#readme"
+Documentation = "https://sts07142.github.io/resumable-upload/"
 Repository = "https://github.com/sts07142/resumable-upload"
 Issues = "https://github.com/sts07142/resumable-upload/issues"
 Changelog = "https://github.com/sts07142/resumable-upload/releases"
@@ -53,6 +53,11 @@ test = [
     "uvicorn>=0.38.0",
     "httpx>=0.24.0",
     "django>=3.2.0",
+]
+docs = [
+    "mkdocs-material>=9.5,<10",
+    "mkdocs>=1.6,<2",
+    "mkdocs-git-revision-date-localized-plugin>=1.2",
 ]
 
 [tool.pytest.ini_options]

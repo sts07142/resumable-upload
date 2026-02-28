@@ -1,0 +1,67 @@
+site_name: Resumable Upload
+site_description: Python TUS resumable upload protocol — server and client
+site_url: https://sts07142.github.io/resumable-upload/
+repo_url: https://github.com/sts07142/resumable-upload
+repo_name: sts07142/resumable-upload
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: en
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.action.edit
+
+plugins:
+  - search
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: date
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.inlinehilite
+  - admonition
+  - pymdownx.details
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Advanced Usage:
+      - Retry & Error Handling: advanced-usage/retry.md
+      - Resume & Partial Uploads: advanced-usage/resume.md
+      - Low-Level Uploader: advanced-usage/uploader.md
+  - Web Frameworks:
+      - Flask: web-frameworks/flask.md
+      - FastAPI: web-frameworks/fastapi.md
+      - Django: web-frameworks/django.md
+  - API Reference:
+      - Client: api-reference/client.md
+      - Server: api-reference/server.md
+      - Storage: api-reference/storage.md
+      - Exceptions & Utilities: api-reference/exceptions.md
+  - TUS Compliance: compliance.md
