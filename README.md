@@ -94,274 +94,57 @@ print(f"Upload complete: {upload_url}")
 
 ## 🔧 Advanced Usage
 
-### Client with Automatic Retry
+For detailed guides see **[docs/advanced-usage.md](docs/advanced-usage.md)**:
 
-```python
-from resumable_upload import TusClient
-
-# Create client with retry capability (retry is enabled by default)
-client = TusClient(
-    "http://localhost:8080/files",
-    chunk_size=1.5*1024*1024,  # 1.5MB chunks (float is allowed)
-    max_retries=3,         # Retry up to 3 times (default: 3)
-    retry_delay=1.0,       # Initial delay between retries (default: 1.0)
-    checksum=True          # Enable checksum verification
-)
-
-# Upload with progress tracking using UploadStats
-from resumable_upload import UploadStats
-
-def progress_callback(stats: UploadStats):
-    print(f"Progress: {stats.progress_percent:.1f}% | "
-          f"Speed: {stats.upload_speed/1024/1024:.2f} MB/s | "
-          f"ETA: {stats.eta_seconds:.0f}s | "
-          f"Chunks: {stats.chunks_completed}/{stats.total_chunks} | "
-          f"Retried: {stats.chunks_retried}")
-
-upload_url = client.upload_file(
-    "large_file.bin",
-    metadata={"filename": "large_file.bin"},
-    progress_callback=progress_callback
-)
-```
-
-### Resume Interrupted Uploads
-
-```python
-# Resume an interrupted upload
-upload_url = client.resume_upload("large_file.bin", upload_url)
-```
-
-### Cross-Session Resumability
-
-```python
-from resumable_upload import TusClient, FileURLStorage
-
-# Enable URL storage for resumability across sessions
-storage = FileURLStorage(".tus_urls.json")
-client = TusClient(
-    "http://localhost:8080/files",
-    store_url=True,
-    url_storage=storage
-)
-
-# Upload will automatically resume if interrupted and restarted
-upload_url = client.upload_file("large_file.bin")
-```
-
-### Using File Streams
-
-```python
-# Upload from a file stream instead of a path
-with open("file.bin", "rb") as fs:
-    client = TusClient("http://localhost:8080/files")
-    upload_url = client.upload_file(
-        file_stream=fs,
-        metadata={"filename": "file.bin"}
-    )
-```
-
-### Exception Handling
-
-```python
-from resumable_upload import TusClient
-from resumable_upload.exceptions import TusCommunicationError, TusUploadFailed
-
-client = TusClient("http://localhost:8080/files")
-
-try:
-    upload_url = client.upload_file("file.bin")
-except TusCommunicationError as e:
-    print(f"Communication error: {e.message}, status: {e.status_code}")
-except TusUploadFailed as e:
-    print(f"Upload failed: {e.message}")
-```
-
-## 🌐 Web Framework Integration
-
-### Flask
-
-```python
-from flask import Flask, request, make_response
-from resumable_upload import TusServer, SQLiteStorage
-
-app = Flask(__name__)
-tus_server = TusServer(storage=SQLiteStorage())
-
-@app.route('/files', methods=['OPTIONS', 'POST'])
-@app.route('/files/<upload_id>', methods=['HEAD', 'PATCH', 'DELETE'])
-def handle_upload(upload_id=None):
-    status, headers, body = tus_server.handle_request(
-        request.method, request.path, dict(request.headers), request.get_data()
-    )
-    response = make_response(body, status)
-    for key, value in headers.items():
-        response.headers[key] = value
-    return response
-```
-
-### FastAPI
-
-```python
-from fastapi import FastAPI, Request, Response
-from resumable_upload import TusServer, SQLiteStorage
-
-app = FastAPI()
-tus_server = TusServer(storage=SQLiteStorage())
-
-@app.post("/files")
-@app.head("/files/{upload_id}")
-@app.patch("/files/{upload_id}")
-@app.delete("/files/{upload_id}")
-async def handle_upload(request: Request):
-    body = await request.body()
-    status, headers, response_body = tus_server.handle_request(
-        request.method, request.url.path, dict(request.headers), body
-    )
-    return Response(content=response_body, status_code=status, headers=headers)
-```
-
-### Django
-
-```python
-from django.http import HttpResponse
-from django.views.decorators.csrf import csrf_exempt
-from resumable_upload import TusServer, SQLiteStorage
-
-tus_server = TusServer(storage=SQLiteStorage())
-
-@csrf_exempt
-def tus_upload_view(request, upload_id=None):
-    headers = {key[5:].replace('_', '-'): value
-               for key, value in request.META.items() if key.startswith('HTTP_')}
-    status, response_headers, response_body = tus_server.handle_request(
-        request.method, request.path, headers, request.body
-    )
-    response = HttpResponse(response_body, status=status)
-    for key, value in response_headers.items():
-        response[key] = value
-    return response
-```
+- Automatic retry with exponential backoff
+- Resume interrupted uploads (in-session and cross-session)
+- Partial uploads with `stop_at`
+- Low-level chunk control via `Uploader` + cancellation with `stop_event`
+- Exception handling
+- Web framework integration (Flask, FastAPI, Django)
 
 ## 📚 API Reference
 
-### TusClient
+Full API documentation is available in **[docs/api-reference.md](docs/api-reference.md)**.
 
-Main client class for uploading files.
+### Quick Reference
 
-**Parameters:**
+| Class | Import | Purpose |
+|-------|--------|---------|
+| `TusClient` | `from resumable_upload import TusClient` | Upload files via TUS protocol |
+| `TusServer` | `from resumable_upload import TusServer` | Serve TUS uploads (framework-agnostic) |
+| `TusHTTPRequestHandler` | `from resumable_upload import TusHTTPRequestHandler` | Handler for Python's built-in `HTTPServer` |
+| `SQLiteStorage` | `from resumable_upload import SQLiteStorage` | SQLite + filesystem storage backend |
+| `FileURLStorage` | `from resumable_upload import FileURLStorage` | JSON file-based URL persistence |
+| `Uploader` | `from resumable_upload.client.uploader import Uploader` | Low-level chunk-by-chunk control |
 
-- `url` (str): TUS server base URL
-- `chunk_size` (int): Size of each upload chunk in bytes (default: 1MB)
-- `checksum` (bool): Enable SHA1 checksum verification (default: True)
-- `store_url` (bool): Store upload URLs for resumability (default: False)
-- `url_storage` (URLStorage): URL storage backend (default: FileURLStorage)
-- `verify_tls_cert` (bool): Verify TLS certificates (default: True)
-- `metadata_encoding` (str): Metadata encoding (default: "utf-8")
-- `headers` (dict): Custom headers to include in all requests (default: {})
-- `max_retries` (int): Maximum retry attempts per chunk (default: 3)
-- `retry_delay` (float): Base delay between retry attempts in seconds (default: 1.0)
+### Key Parameters
 
-**Methods:**
+**`TusClient`**: `url`, `chunk_size` (default 1 MB), `checksum` (SHA1, default `True`), `max_retries` (default 3), `retry_delay` (default 1.0s, exponential backoff capped at 60s), `timeout` (default 30s), `store_url` / `url_storage` (cross-session resume), `verify_tls_cert`, `headers`
 
-- `upload_file(file_path=None, file_stream=None, metadata={}, progress_callback=None, stop_at=None)`: Upload a file
-- `resume_upload(file_path, upload_url, progress_callback=None)`: Resume an interrupted upload
-- `delete_upload(upload_url)`: Delete an upload
-- `get_upload_info(upload_url)`: Get upload information (offset, length, complete, metadata)
-- `get_metadata(upload_url)`: Get upload metadata
-- `get_server_info()`: Get server capabilities and information
-- `update_headers(headers)`: Update custom headers at runtime
-- `get_headers()`: Get current custom headers
-- `create_uploader(file_path=None, file_stream=None, upload_url=None, metadata={}, chunk_size=None)`: Create an Uploader instance
+**`TusServer`**: `storage`, `base_path` (default `/files`), `max_size`, `upload_expiry`, `cors_allow_origins`, `request_timeout` (default 30s — Slowloris protection)
 
-### TusClient Retry Configuration
+**`SQLiteStorage`**: `db_path` (default `uploads.db`), `upload_dir` (default `uploads`) — thread-safe via per-upload lock; process-safe via `fcntl.flock`
 
-The `TusClient` includes built-in retry functionality with exponential backoff.
-
-**Retry Parameters:**
-
-- `max_retries` (int): Maximum number of retry attempts per chunk (default: 3)
-- `retry_delay` (float): Base delay between retry attempts in seconds (default: 1.0)
-  - Uses exponential backoff: delay = retry_delay * (2^attempt)
-- To disable retry, set `max_retries=0`
-
-### TusServer
-
-Server implementation of TUS protocol.
-
-**Parameters:**
-
-- `storage` (Storage): Storage backend for managing uploads
-- `base_path` (str): Base path for TUS endpoints (default: "/files")
-- `max_size` (int): Maximum upload size in bytes (default: None)
-
-**Methods:**
-
-- `handle_request(method, path, headers, body)`: Handle TUS protocol requests
-
-### SQLiteStorage
-
-SQLite-based storage backend.
-
-**Parameters:**
-
-- `db_path` (str): Path to SQLite database file (default: "uploads.db")
-- `upload_dir` (str): Directory for storing upload files (default: "uploads")
+**`FileURLStorage`**: `storage_path` (default `.tus_urls.json`) — thread-safe via `threading.Lock`; process-safe via `fcntl.flock`
 
 ## 🔍 TUS Protocol Compliance
 
-This library implements [TUS protocol v1.0.0](https://tus.io/protocols/resumable-upload.html).
+This library implements [TUS protocol v1.0.0](https://tus.io/protocols/resumable-upload.html). Full compliance details: **[TUS_COMPLIANCE.md](TUS_COMPLIANCE.md)**.
 
 ### Extensions
 
-| Extension | Status | Notes |
-|-----------|--------|-------|
-| **core** | ✅ Implemented | POST / HEAD / PATCH, offset tracking, version negotiation |
-| **creation** | ✅ Implemented | Upload creation via POST with `Upload-Length` |
-| **creation-with-upload** | ✅ Implemented | Initial data in POST body |
-| **termination** | ✅ Implemented | Upload deletion via DELETE |
-| **checksum** | ✅ Implemented | SHA1 (`Upload-Checksum` header) |
-| **expiration** | ✅ Implemented | `Upload-Expires` header + server-side periodic cleanup |
-| **concatenation** | ❌ Not implemented | Combining parallel uploads |
+| Extension | Status |
+|-----------|--------|
+| **core** | ✅ Implemented |
+| **creation** | ✅ Implemented |
+| **creation-with-upload** | ✅ Implemented |
+| **termination** | ✅ Implemented |
+| **checksum** | ✅ Implemented (SHA1) |
+| **expiration** | ✅ Implemented |
+| **concatenation** | ❌ Not implemented |
 
-### Protocol Details
-
-| Requirement | Status | Notes |
-|-------------|--------|-------|
-| `Tus-Resumable` header on all responses | ✅ | |
-| `412` on version mismatch | ✅ | |
-| `415` on wrong `Content-Type` in PATCH | ✅ | |
-| `409` on `Upload-Offset` mismatch | ✅ | |
-| `410` on expired upload access | ✅ | |
-| `Cache-Control: no-store` in HEAD | ✅ | |
-| `Upload-Expires` in POST / HEAD / PATCH responses | ✅ | When expiry is configured |
-| `Tus-Checksum-Algorithm` in OPTIONS | ✅ | Reports `sha1` |
-| `Content-Length: 0` in client DELETE | ✅ | |
-| Malformed `Content-Length` → `400` | ✅ | |
-| Chunk overflow → `400` | ✅ | Prevents exceeding declared `Upload-Length` |
-| `X-HTTP-Method-Override` | ❌ Not implemented | For environments blocking PATCH/DELETE |
-| Deferred length (`Upload-Defer-Length`) | ❌ Not implemented | Part of creation extension |
-
-### Sequential Upload Requirement
-
-**Important:** The TUS protocol requires chunks to be uploaded **sequentially**, not in parallel.
-
-1. **Offset Validation**: Each chunk must be uploaded at the correct byte offset
-2. **Data Integrity**: Prevents data corruption from race conditions
-3. **Resume Capability**: Makes tracking received bytes straightforward and reliable
-4. **Protocol Compliance**: TUS specification requires `Upload-Offset` to match current position
-
-```python
-# ❌ Parallel uploads cause conflicts:
-# Chunk 1 at offset 0    → OK
-# Chunk 3 at offset 2048 → FAIL (409: expected offset 1024)
-# Chunk 2 at offset 1024 → FAIL (409: offset mismatch)
-
-# ✅ Sequential uploads work correctly:
-# Chunk 1 at offset 0    → OK (offset now 1024)
-# Chunk 2 at offset 1024 → OK (offset now 2048)
-# Chunk 3 at offset 2048 → OK (offset now 3072)
-```
+> **Note:** TUS `Upload-Checksum` uses **SHA1** as required by the spec. The internal client-side fingerprint for cross-session resume uses **SHA-256** and is not part of the TUS protocol.
 
 ## 🧪 Testing
 
@@ -397,6 +180,8 @@ make ci                # Run full CI checks (lint + format + test)
 
 - **English**: [README.md](README.md)
 - **한국어 (Korean)**: [README.ko.md](README.ko.md)
+- **Advanced Usage**: [docs/advanced-usage.md](docs/advanced-usage.md)
+- **Full API Reference**: [docs/api-reference.md](docs/api-reference.md)
 - **TUS Protocol Compliance**: [TUS_COMPLIANCE.md](TUS_COMPLIANCE.md)
 
 ## 🤝 Contributing
@@ -414,5 +199,5 @@ This library is inspired by the official [TUS Python client](https://github.com/
 ## 📞 Support
 
 - 📫 Issues: [GitHub Issues](https://github.com/sts07142/resumable-upload/issues)
-- 📖 Documentation: [GitHub README](https://github.com/sts07142/resumable-upload#readme)
+- 📖 Documentation: [sts07142.github.io/resumable-upload](https://sts07142.github.io/resumable-upload/)
 - 🌟 Star us on GitHub!

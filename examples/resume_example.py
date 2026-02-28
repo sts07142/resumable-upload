@@ -49,7 +49,7 @@ def main():
         sys.exit(1)
 
     # FileURLStorage persists { fingerprint → upload_url } between runs.
-    # The fingerprint is an MD5 of the full file content + size, so
+    # The fingerprint is a SHA-256 of the full file content + size, so
     # different files never collide.
     url_storage = FileURLStorage(".tus_urls.json")
 

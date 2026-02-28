@@ -1,6 +1,6 @@
 # TUS Protocol Compliance
 
-This document details the compliance status of this library against the [TUS resumable upload protocol v1.0.0](https://tus.io/protocols/resumable-upload.html).
+Compliance status against the [TUS resumable upload protocol v1.0.0](https://tus.io/protocols/resumable-upload.html).
 
 ## Extensions
 
@@ -14,9 +14,7 @@ This document details the compliance status of this library against the [TUS res
 | **expiration** | ✅ Implemented | `Upload-Expires` in POST / HEAD / PATCH responses; periodic server-side cleanup |
 | **concatenation** | ❌ Not implemented | Combining parallel partial uploads |
 
-## Protocol Requirements
-
-### Version Negotiation
+## Version Negotiation
 
 | Requirement | Status |
 |-------------|--------|
@@ -26,7 +24,7 @@ This document details the compliance status of this library against the [TUS res
 | Server skips version check for OPTIONS | ✅ |
 | Server advertises supported versions in `Tus-Version` (OPTIONS) | ✅ |
 
-### Core Protocol — Server
+## Core Protocol — Server
 
 | Requirement | Status | Notes |
 |-------------|--------|-------|
@@ -54,7 +52,7 @@ This document details the compliance status of this library against the [TUS res
 | Invalid base64 in `Upload-Metadata` → `400` | ✅ | |
 | Socket read timeout (Slowloris protection) | ✅ | `TusHTTPRequestHandler.setup()` applies `request_timeout` (default 30s) |
 
-### Core Protocol — Client
+## Core Protocol — Client
 
 | Requirement | Status | Notes |
 |-------------|--------|-------|
@@ -72,7 +70,7 @@ This document details the compliance status of this library against the [TUS res
 | `409` on concurrent offset conflict (atomic CAS) | ✅ | `UPDATE ... WHERE offset = ?`; returns `409` if row not updated |
 | `409` received → HEAD re-sync before retry | ✅ | Client fetches current offset and re-seeks before retrying chunk |
 
-### Not Implemented
+## Not Implemented
 
 | Feature | Notes |
 |---------|-------|
@@ -85,9 +83,9 @@ This document details the compliance status of this library against the [TUS res
 
 | Status | Meaning | Trigger |
 |--------|---------|---------|
-| `400` | Bad Request | Missing/invalid header, negative offset, chunk overflow |
+| `400` | Bad Request | Missing/invalid header, negative offset, chunk overflow, oversized metadata |
 | `404` | Not Found | Unknown upload ID |
-| `409` | Conflict | `Upload-Offset` mismatch |
+| `409` | Conflict | `Upload-Offset` mismatch or concurrent write conflict |
 | `410` | Gone | Upload has expired |
 | `412` | Precondition Failed | Unsupported TUS version |
 | `413` | Payload Too Large | Exceeds `Tus-Max-Size` |

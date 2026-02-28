@@ -60,7 +60,7 @@ class TestFingerprint:
 
             # Same file should generate same fingerprint
             assert fp1 == fp2
-            # Fingerprint should contain size and MD5
+            # Fingerprint should contain size and SHA-256
             assert "size:" in fp1
             assert "--sha256:" in fp1
         finally:
